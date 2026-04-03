@@ -418,10 +418,10 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
 
     chip_mult = 1.0
     if foreign_60d is not None and foreign_60d > CHIP_MIN_ABS:
-        reasons.append(f"外資60日淨買 {foreign_60d/1e3:.0f}K")
+        reasons.append(f"外資60日淨買 {foreign_60d/1e3:,.0f}張")
         chip_mult *= 1.05
     if trust_60d is not None and trust_60d > CHIP_MIN_ABS:
-        reasons.append(f"投信60日淨買 {trust_60d/1e3:.0f}K")
+        reasons.append(f"投信60日淨買 {trust_60d/1e3:,.0f}張")
         chip_mult *= 1.05
 
     foreign_selling = foreign_10d is not None and foreign_10d < -CHIP_MIN_ABS
