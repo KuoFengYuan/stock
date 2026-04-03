@@ -44,7 +44,7 @@ export default function HomePage() {
   const fetchRecommendations = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/recommendations')
+      const res = await fetch('/api/recommendations?limit=2000')
       const json = await res.json()
       setData(json)
     } finally {
@@ -127,7 +127,7 @@ export default function HomePage() {
       <div className="flex items-start justify-between mb-6 gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white">今日推薦清單</h1>
-          {data?.date && <p className="text-slate-400 text-sm mt-1">資料日期：{data.date}　共 {data.total} 檔</p>}
+          {data?.date && <p className="text-slate-400 text-sm mt-1">資料日期：{data.date}　共 {data.items.length} 檔</p>}
         </div>
         <div className="flex flex-col items-end gap-2">
           <div className="flex gap-2">

@@ -606,21 +606,33 @@ def sync_chips(conn):
     """同步三大法人 + 融資融券（增量）"""
     started_at = int(time.time() * 1000)
 
-    # 找缺少的日期
-    row = conn.execute("SELECT MAX(date) FROM institutional").fetchone()
-    latest_in_db = row[0] if row and row[0] else None
+    # 分別找 TSE / OTC 的最新日期，取較早者作為起始（避免 OTC 缺資料被跳過）
+    tse_latest = conn.execute(
+        "SELECT MAX(i.date) FROM institutional i JOIN stocks s ON s.symbol=i.symbol WHERE s.market='TSE'"
+    ).fetchone()[0]
+    otc_latest = conn.execute(
+        "SELECT MAX(i.date) FROM institutional i JOIN stocks s ON s.symbol=i.symbol WHERE s.market='OTC'"
+    ).fetchone()[0]
 
-    if latest_in_db:
-        start = datetime.strptime(latest_in_db, "%Y-%m-%d").date()
-        today = date.today()
-        dates_to_fill = [start + timedelta(days=i) for i in range(1, (today - start).days + 1)]
-        dates_to_fill = [d for d in dates_to_fill if d.weekday() < 5]
+    # 若 OTC 完全沒資料，從近180天開始補；否則取兩者較早的日期
+    today = date.today()
+    if not tse_latest and not otc_latest:
+        start = today - timedelta(days=270)
     else:
-        # 首次：抓近180個交易日（約9個月）
-        start = date.today() - timedelta(days=270)
-        today = date.today()
-        dates_to_fill = [start + timedelta(days=i) for i in range((today - start).days + 1)]
-        dates_to_fill = [d for d in dates_to_fill if d.weekday() < 5]
+        candidates = [d for d in [tse_latest, otc_latest] if d]
+        earliest = min(candidates)
+        start = datetime.strptime(earliest, "%Y-%m-%d").date()
+
+    dates_to_fill = [start + timedelta(days=i) for i in range(1, (today - start).days + 1)]
+    dates_to_fill = [d for d in dates_to_fill if d.weekday() < 5]
+
+    if not otc_latest:
+        # OTC 從未同步：補近270天（約一年）
+        otc_start = today - timedelta(days=270)
+        otc_dates = [otc_start + timedelta(days=i) for i in range((today - otc_start).days + 1)]
+        otc_dates = [d for d in otc_dates if d.weekday() < 5]
+        # 合併去重
+        dates_to_fill = sorted(set(dates_to_fill) | set(otc_dates))
 
     if not dates_to_fill:
         print("籌碼資料已是最新", flush=True)
