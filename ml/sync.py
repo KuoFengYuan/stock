@@ -365,7 +365,8 @@ def _twse_tpex_history_bulk(conn, start_date: str) -> int:
         day_rows = _fetch_stock_month(code, is_otc, ym)
         return symbol, day_rows
 
-    WORKERS = 50
+    WORKERS = 120
+    BATCH_SIZE = 2000
     done = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as executor:
         futures = {executor.submit(_dl, t): t for t in tasks}
@@ -374,17 +375,27 @@ def _twse_tpex_history_bulk(conn, start_date: str) -> int:
             for date_str, o, h, l, c, vol in day_rows:
                 batch_results.append((symbol, date_str, o, h, l, c, vol, c))
             done += 1
-            if done % 500 == 0 or done == len(tasks):
-                print(f"  下載進度 {done}/{len(tasks)}，暫存 {len(batch_results)} 筆", flush=True)
+            if done % 200 == 0 or done == len(tasks):
+                pct = done * 100 // len(tasks)
+                print(f"  下載進度 {done}/{len(tasks)} ({pct}%)，暫存 {len(batch_results)} 筆", flush=True)
+            # 每累積 BATCH_SIZE 筆就先寫入，避免記憶體暴增
+            if len(batch_results) >= BATCH_SIZE:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
+                    batch_results
+                )
+                conn.commit()
+                total += len(batch_results)
+                batch_results = []
 
-    # 一次性寫入
+    # 寫入剩餘資料
     if batch_results:
         conn.executemany(
             "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
             batch_results
         )
         conn.commit()
-        total = len(batch_results)
+        total += len(batch_results)
 
     print(f"  TWSE+TPEX 個股歷史資料：{total} 筆", flush=True)
     return total
