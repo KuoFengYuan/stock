@@ -215,21 +215,15 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
         <div ref={priceRef} className="w-full" />
         {priceTooltip && (
           <div
-            className="absolute top-2 pointer-events-none px-2.5 py-1.5 rounded text-xs whitespace-nowrap z-10"
-            style={{
-              left: Math.min(priceTooltip.x + 14, (priceRef.current?.clientWidth ?? 600) - 200),
-              background: '#0f172a',
-              border: '1px solid #475569',
-            }}
+            className="absolute top-1 left-2 pointer-events-none px-2 py-1 rounded text-xs whitespace-nowrap z-10 flex items-center gap-2"
+            style={{ background: 'rgba(15,23,42,0.85)', border: '1px solid #334155' }}
           >
-            <div className="text-slate-400 mb-1">{priceTooltip.date}</div>
-            <div className="grid grid-cols-2 gap-x-3 gap-y-0.5" style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>
-              <span className="text-slate-500">開</span><span>{priceTooltip.open.toFixed(2)}</span>
-              <span className="text-slate-500">高</span><span>{priceTooltip.high.toFixed(2)}</span>
-              <span className="text-slate-500">低</span><span>{priceTooltip.low.toFixed(2)}</span>
-              <span className="text-slate-500">收</span><span>{priceTooltip.close.toFixed(2)}</span>
-            </div>
-            <div className="mt-1 text-slate-400">量 {priceTooltip.volume.toLocaleString()} 張</div>
+            <span className="text-slate-500">{priceTooltip.date}</span>
+            <span className="text-slate-500">開</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.open.toFixed(2)}</span>
+            <span className="text-slate-500">高</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.high.toFixed(2)}</span>
+            <span className="text-slate-500">低</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.low.toFixed(2)}</span>
+            <span className="text-slate-500">收</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.close.toFixed(2)}</span>
+            <span className="text-slate-500">量</span><span className="text-slate-400">{priceTooltip.volume.toLocaleString()}</span>
           </div>
         )}
       </div>
