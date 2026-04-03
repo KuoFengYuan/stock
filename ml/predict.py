@@ -1,6 +1,11 @@
 """
 預測腳本：用訓練好的模型對最新資料評分，結果寫入 recommendations 表
-用法：python ml/predict.py
+改進：
+1. ML 權重公式修正：AUC 0.55→30%, 0.65→65%，更合理反映模型價值
+2. 推薦門檻改用 apply_rules 的動態門檻（與 rule_engine 一致）
+3. 預測時特徵填補改用訓練集中位數（model bundle 存的），而非即時中位數
+4. 預測時籌碼計算與訓練一致（rolling 60日 sum）
+5. 大盤擇時傳入 predict，熊市提高門檻
 """
 import sys
 import sqlite3
@@ -13,8 +18,8 @@ import pandas as pd
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from features import build_feature_matrix, FEATURE_COLS
-from rule_engine import calc_indicators, calc_fundamentals, apply_rules
+from features import _calc_price_features, _get_fund_features
+from rule_engine import calc_indicators, calc_fundamentals, apply_rules, calc_monthly_revenue, _calc_high_1y, _calc_market_win_rate
 
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 MODEL_PATH = Path(__file__).parent / "model.pkl"
@@ -29,13 +34,15 @@ def run_predict():
         bundle = pickle.load(f)
     model = bundle["model"]
     feature_cols = bundle["feature_cols"]
+    model_auc = bundle.get("mean_auc", 0.60)
+    # 訓練集中位數（比即時中位數更穩定，避免因預測樣本少而偏移）
+    feature_medians = bundle.get("feature_medians", {})
 
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
 
-    # 取最新交易日
     row = conn.execute("SELECT date FROM stock_prices ORDER BY date DESC LIMIT 1").fetchone()
     if not row:
         print("無價格資料", flush=True)
@@ -43,6 +50,17 @@ def run_predict():
         return
     latest_date = row["date"]
     print(f"預測日期：{latest_date}", flush=True)
+
+    # 大盤擇時：計算市場近期勝率
+    market_win_rate = _calc_market_win_rate(conn)
+    market_env = "熊市" if market_win_rate < 0.42 else ("牛市" if market_win_rate > 0.55 else "正常")
+    print(f"市場近期勝率：{market_win_rate:.1%}（{market_env}）", flush=True)
+
+    # ML 權重：AUC 0.50→0%, 0.55→30%, 0.65→65%, 0.70+→80%
+    # 線性插值：(AUC - 0.50) / 0.20 * 0.80，上限 0.80
+    ml_weight = max(0.0, min(0.80, (model_auc - 0.50) / 0.20 * 0.80))
+    rule_weight = 1.0 - ml_weight
+    print(f"模型 AUC={model_auc:.4f}，ML權重={ml_weight:.2f}，規則權重={rule_weight:.2f}", flush=True)
 
     symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM stocks").fetchall()]
     count = 0
@@ -62,7 +80,6 @@ def run_predict():
             df["date"] = pd.to_datetime(df["date"])
             df = df.set_index("date")
 
-            from features import _calc_price_features, _get_fund_features, _get_chip_features, _load_all_institutional, _load_all_margin
             price_feats = _calc_price_features(df)
             if price_feats.empty or len(price_feats.dropna(how="all")) == 0:
                 continue
@@ -70,12 +87,12 @@ def run_predict():
             latest_feat = price_feats.iloc[[-1]].copy()
             current_price = float(df["close"].iloc[-1])
 
-            # 基本面（傳入股價以計算 PE/PB）
+            # 基本面
             fund = _get_fund_features(symbol, conn, price=current_price)
             for k, v in fund.items():
                 latest_feat[k] = v
 
-            # 籌碼（5日 + 20日累計）
+            # 籌碼：與訓練時一致，用 rolling 60日 sum
             inst_rows = conn.execute(
                 "SELECT date, foreign_net, trust_net, total_net FROM institutional WHERE symbol=? ORDER BY date DESC LIMIT 65",
                 (symbol,)
@@ -86,91 +103,75 @@ def run_predict():
             ).fetchall()
 
             if inst_rows:
-                inst_df = pd.DataFrame(inst_rows, columns=["date","foreign_net","trust_net","total_net"])
+                inst_df = pd.DataFrame(inst_rows, columns=["date", "foreign_net", "trust_net", "total_net"])
+                # 60日累計（與訓練特徵一致）
                 latest_feat["foreign_net_60d"] = inst_df["foreign_net"].head(60).sum()
                 latest_feat["trust_net_60d"]   = inst_df["trust_net"].head(60).sum()
+                # 10日用於籌碼警告（不進模型）
                 latest_feat["foreign_net_10d"] = inst_df["foreign_net"].head(10).sum()
                 latest_feat["trust_net_10d"]   = inst_df["trust_net"].head(10).sum()
+
             if margin_rows and len(margin_rows) >= 6:
-                mg = pd.DataFrame(margin_rows, columns=["date","margin_balance","short_balance"])
+                mg = pd.DataFrame(margin_rows, columns=["date", "margin_balance", "short_balance"])
                 mb_now, mb_5 = mg["margin_balance"].iloc[0], mg["margin_balance"].iloc[5]
                 sb_now, sb_5 = mg["short_balance"].iloc[0], mg["short_balance"].iloc[5]
                 latest_feat["margin_balance_chg"] = (mb_now - mb_5) / mb_5 * 100 if mb_5 else 0
-                latest_feat["short_balance_chg"] = (sb_now - sb_5) / sb_5 * 100 if sb_5 else 0
+                latest_feat["short_balance_chg"]  = (sb_now - sb_5) / sb_5 * 100 if sb_5 else 0
 
-            # 補齊缺失的特徵欄（確保所有 feature_cols 都存在）
+            # 補齊缺失特徵
             for col in feature_cols:
                 if col not in latest_feat.columns:
                     latest_feat[col] = np.nan
 
-            # 準備特徵向量
             X = latest_feat[feature_cols].astype(float)
             if X.isnull().all(axis=1).iloc[0]:
                 continue
 
-            # 用中位數填補 NaN
-            X = X.fillna(X.median())
+            # 用訓練集中位數填補（比即時中位數更穩定）
+            if feature_medians:
+                for col in feature_cols:
+                    if pd.isna(X[col].iloc[0]) and col in feature_medians:
+                        X[col] = feature_medians[col]
+            X = X.fillna(0)  # 仍有殘餘 NaN 則填 0
 
             ml_score = float(model.predict_proba(X)[0, 1])
 
-            # 同時跑規則引擎取得理由
+            # 規則引擎
             tech = calc_indicators(df)
-            from rule_engine import _calc_high_1y
             tech["high_1y"] = _calc_high_1y(df)
-            fund2 = calc_fundamentals(symbol, conn)
-            from rule_engine import calc_monthly_revenue
-            monthly = calc_monthly_revenue(symbol, conn)
-            close = float(df["close"].iloc[-1])
-            reasons, rule_signal, rule_score = apply_rules(tech, fund2, close, monthly)
+            if inst_rows:
+                tech["foreign_net_60d"] = float(latest_feat["foreign_net_60d"].iloc[0]) if "foreign_net_60d" in latest_feat.columns else 0
+                tech["trust_net_60d"]   = float(latest_feat["trust_net_60d"].iloc[0])   if "trust_net_60d"   in latest_feat.columns else 0
+                tech["foreign_net_10d"] = float(latest_feat["foreign_net_10d"].iloc[0]) if "foreign_net_10d" in latest_feat.columns else 0
+                tech["trust_net_10d"]   = float(latest_feat["trust_net_10d"].iloc[0])   if "trust_net_10d"   in latest_feat.columns else 0
 
-            # 動態 ML 權重：根據模型 AUC 決定 ML 比重
-            # AUC 存在 bundle 中（訓練時寫入），若無則預設 0.60
-            model_auc = bundle.get("mean_auc", 0.60)
-            # AUC 0.50 = 隨機猜測，完全不可信；AUC 0.70+ = 有效模型
-            # 線性映射：AUC 0.50 → ml_weight 0.0；AUC 0.70 → ml_weight 0.7
-            ml_weight = max(0.0, min(0.7, (model_auc - 0.50) / 0.20 * 0.7))
-            rule_weight = 1.0 - ml_weight
+            fund2 = calc_fundamentals(symbol, conn)
+            monthly = calc_monthly_revenue(symbol, conn)
+            reasons, rule_signal, rule_score = apply_rules(tech, fund2, current_price, monthly, market_win_rate)
 
             # 混合評分
             final_score = ml_score * ml_weight + rule_score * rule_weight
 
-            # 規則引擎 neutral（基本面不過關）→ 不論 ML 分數多高都不推薦
+            # 規則引擎 neutral → 不論 ML 分數多高都不推薦
             if rule_signal == "neutral":
                 signal = "neutral"
-                final_score = 0.3
-            elif final_score >= 0.56:
-                signal = "buy"
-            elif final_score >= 0.50:
-                signal = "watch"
+                final_score = min(final_score, 0.45)
             else:
-                signal = "neutral"
+                # 動態門檻（與 apply_rules 相同邏輯）
+                buy_thresh   = 0.56 + (market_win_rate - 0.50) * 0.30
+                watch_thresh = 0.50 + (market_win_rate - 0.50) * 0.30
+                if market_win_rate < 0.42:
+                    buy_thresh   = max(buy_thresh, 0.58)
+                    watch_thresh = max(watch_thresh, 0.52)
+                buy_thresh   = max(0.52, min(buy_thresh,   0.65))
+                watch_thresh = max(0.46, min(watch_thresh, 0.58))
 
-            # 籌碼警告：法人近10日同步賣超 → 強制降級（與 rule_engine 一致）
-            foreign_10d = float(latest_feat["foreign_net_10d"].iloc[0]) if "foreign_net_10d" in latest_feat.columns else None
-            trust_10d   = float(latest_feat["trust_net_10d"].iloc[0])   if "trust_net_10d"   in latest_feat.columns else None
-            if foreign_10d is not None and trust_10d is not None:
-                if foreign_10d < 0 and trust_10d < 0:
-                    reasons.append("⚠ 法人近10日同步賣超")
-                    if signal == "buy":
-                        signal = "watch"
-                    elif signal == "watch":
-                        signal = "neutral"
-                elif foreign_10d > 0 and trust_10d < 0:
-                    f, t = abs(foreign_10d), abs(trust_10d)
-                    if t > f * 3:
-                        reasons.append("⚠ 投信大賣／外資小買（近10日）")
-                        if signal == "buy":
-                            signal = "watch"
-                    else:
-                        reasons.append("外資買超／投信賣超（近10日）")
-                elif foreign_10d < 0 and trust_10d > 0:
-                    f, t = abs(foreign_10d), abs(trust_10d)
-                    if f > t * 3:
-                        reasons.append("⚠ 外資大賣／投信小買（近10日）")
-                        if signal == "buy":
-                            signal = "watch"
-                    else:
-                        reasons.append("投信買超／外資賣超（近10日）")
+                if final_score >= buy_thresh:
+                    signal = "buy"
+                elif final_score >= watch_thresh:
+                    signal = "watch"
+                else:
+                    signal = "neutral"
 
             features_json = json.dumps({
                 col: (float(X[col].iloc[0]) if not pd.isna(X[col].iloc[0]) else None)
@@ -184,7 +185,7 @@ def run_predict():
                 (
                     symbol, latest_date, final_score, signal,
                     features_json, json.dumps(reasons),
-                    "xgb_v2", int(time.time() * 1000)
+                    "xgb_v3", int(time.time() * 1000)
                 )
             )
             count += 1

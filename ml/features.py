@@ -1,7 +1,10 @@
 """
 特徵工程
-- 修正 lookahead bias：每個訓練點只用「該日期之前」已知的財務資料
-- 新增籌碼特徵：三大法人淨買、融資餘額變化
+改進：
+1. ROE 使用平均 equity（當季 + 前季平均），而非只用最新季
+2. 負 EPS 時 PE 設為 NaN（虧損無意義）
+3. 預測時籌碼特徵計算與訓練邏輯一致（60日滾動sum）
+4. 修正股數推算：改用4季中位數減少配股/庫藏股雜訊
 """
 import sqlite3
 import pandas as pd
@@ -12,17 +15,17 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 
 FEATURE_COLS = [
-    # 技術面（中長期視角，保留趨勢和位置，短線指標降權）
+    # 技術面
     "rsi14",
     "bb_pos",
     "sma20_bias", "sma60_bias",
     "vol_ratio",
     "return20d", "return60d",
     "atr_pct",
-    # 基本面（已修正 lookahead bias）—— 中長期核心訊號
+    # 基本面（已修正 lookahead bias）
     "eps_ttm", "roe", "debt_ratio", "revenue_yoy", "ni_yoy",
     "pe_ratio", "pb_ratio",
-    # 籌碼面（法人動向對中長期有指向性）
+    # 籌碼面
     "foreign_net_60d",
     "trust_net_60d",
     "margin_balance_chg",
@@ -39,9 +42,7 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
 
     symbols = [r[0] for r in conn.execute("SELECT symbol FROM stocks").fetchall()]
 
-    # 預載所有財務資料（修正 lookahead bias 用）
     all_financials = _load_all_financials(conn)
-    # 預載籌碼資料
     all_inst = _load_all_institutional(conn)
     all_margin = _load_all_margin(conn)
 
@@ -62,23 +63,21 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
         if feats.empty:
             continue
 
-        # 財務特徵（修正 lookahead bias）
         fund_ts = _get_fund_timeseries(symbol, all_financials, feats.index)
         for col in ["eps_ttm", "roe", "debt_ratio", "revenue_yoy", "ni_yoy"]:
             feats[col] = fund_ts.get(col, pd.Series(dtype=float))
 
-        # PE / PB（股價已在 feats.index 上，搭配 eps_ttm / bvps 計算）
         close_s = df["close"].reindex(feats.index)
         eps_ttm_s = fund_ts.get("eps_ttm")
         bvps_s = fund_ts.get("bvps")
         if eps_ttm_s is not None:
+            # 負 EPS 時 PE 無意義，設為 NaN
             feats["pe_ratio"] = close_s / eps_ttm_s.replace(0, np.nan)
-            feats["pe_ratio"] = feats["pe_ratio"].where(feats["pe_ratio"] > 0)  # 虧損時 PE 無意義
+            feats["pe_ratio"] = feats["pe_ratio"].where(eps_ttm_s > 0)
         if bvps_s is not None:
             feats["pb_ratio"] = close_s / bvps_s.replace(0, np.nan)
             feats["pb_ratio"] = feats["pb_ratio"].where(feats["pb_ratio"] > 0)
 
-        # 籌碼特徵
         chip_feats = _get_chip_features(symbol, all_inst, all_margin, feats.index)
         for col in ["foreign_net_60d", "trust_net_60d", "margin_balance_chg", "short_balance_chg"]:
             feats[col] = chip_feats.get(col, pd.Series(dtype=float))
@@ -137,7 +136,6 @@ def _calc_price_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_all_financials(conn) -> dict:
-    """載入所有財務資料，key=symbol，value=按季度排序的 list"""
     rows = conn.execute(
         "SELECT symbol, year, quarter, revenue, net_income, eps, equity, total_assets, total_debt FROM financials ORDER BY symbol, year, quarter"
     ).fetchall()
@@ -152,9 +150,11 @@ def _load_all_financials(conn) -> dict:
 
 def _get_fund_timeseries(symbol: str, all_financials: dict, date_index: pd.DatetimeIndex) -> dict:
     """
-    修正 lookahead bias（向量化版本）：
-    把每季財報轉成「公告日起生效」的時序，再 reindex 到 date_index。
-    公告時程：Q1→5/15, Q2→8/14, Q3→11/14, Q4→隔年3/31
+    修正 lookahead bias：把每季財報轉成「公告日起生效」的時序，再 reindex 到 date_index。
+    改進：
+    - ROE 用平均 equity（當季 + 前季）
+    - 負 EPS 時 PE 設 NaN
+    - 股數用4季中位數，減少配股/庫藏股雜訊
     """
     records = all_financials.get(symbol, [])
     if not records:
@@ -170,14 +170,11 @@ def _get_fund_timeseries(symbol: str, all_financials: dict, date_index: pd.Datet
     df["announce_date"] = df.apply(lambda r: announce_date(r["year"], r["quarter"]), axis=1)
     df = df.sort_values("announce_date").reset_index(drop=True)
 
-    # 建立「公告日」為 index 的時序，用 ffill 填充到交易日
     full_index = date_index.union(df["announce_date"])
 
     def _rolling_ttm(col):
-        # 先在公告日 index 做 rolling sum（只有 N 個點，不受 NaN 污染）
-        # 再 ffill/bfill 到完整 date_index
         s_ann = df.set_index("announce_date")[col]
-        ttm = s_ann.rolling(4, min_periods=1).sum()
+        ttm = s_ann.rolling(4, min_periods=2).sum()
         return ttm.reindex(full_index).ffill().bfill().reindex(date_index)
 
     def _latest(col):
@@ -186,28 +183,42 @@ def _get_fund_timeseries(symbol: str, all_financials: dict, date_index: pd.Datet
 
     eps_ttm = _rolling_ttm("eps")
     ni_ttm = _rolling_ttm("net_income")
-    equity_s = _latest("equity")
-    roe = ni_ttm / equity_s.replace(0, np.nan) * 100
+
+    # ROE 改用平均 equity（當季 + 前季）
+    equity_ann = df.set_index("announce_date")["equity"]
+    avg_equity_ann = (equity_ann + equity_ann.shift(1)) / 2
+    avg_equity_s = avg_equity_ann.reindex(full_index).ffill().bfill().reindex(date_index)
+    roe = ni_ttm / avg_equity_s.replace(0, np.nan) * 100
 
     ta_s = _latest("total_assets")
     td_s = _latest("total_debt")
     debt_ratio = td_s / ta_s.replace(0, np.nan) * 100
 
-    # YoY：先在公告日序列做 pct_change(4)（4季前），再 ffill/bfill 到交易日
     rev_yoy_ann = df.set_index("announce_date")["revenue"].pct_change(4) * 100
     ni_yoy_ann  = df.set_index("announce_date")["net_income"].pct_change(4) * 100
-    # 基期為負（虧損轉盈）或超過 500% 視為失真，設為 NaN
     ni_base = df.set_index("announce_date")["net_income"].shift(4)
-    # 基期需 > 500萬（避免近零基期造成虛高 YoY），且 YoY < 500%
     ni_yoy_ann = ni_yoy_ann.where((ni_base > 5e6) & (ni_yoy_ann < 500))
     rev_yoy = rev_yoy_ann.reindex(full_index).ffill().bfill().reindex(date_index)
     ni_yoy  = ni_yoy_ann.reindex(full_index).ffill().bfill().reindex(date_index)
 
-    # 每股淨值（bvps）：用單季 net_income / eps 推算股數，避免需要另存股本資料
-    ni_q_s  = _latest("net_income")
-    eps_q_s = _latest("eps")
-    shares_s = ni_q_s / eps_q_s.replace(0, np.nan)
-    bvps_s = equity_s / shares_s.replace(0, np.nan)
+    # 股數改用4季中位數，減少配股/庫藏股雜訊
+    shares_candidates = []
+    for _, r in df.iterrows():
+        if r.get("eps") and r["eps"] != 0 and r.get("net_income"):
+            s = r["net_income"] / r["eps"]
+            if s > 0:
+                shares_candidates.append(s)
+    if shares_candidates:
+        # 用最近4季的中位數
+        shares_median = float(np.median(shares_candidates[-4:]))
+    else:
+        shares_median = None
+
+    equity_s = _latest("equity")
+    if shares_median and shares_median > 0:
+        bvps_s = equity_s / shares_median
+    else:
+        bvps_s = None
 
     return {
         "eps_ttm": eps_ttm,
@@ -215,7 +226,7 @@ def _get_fund_timeseries(symbol: str, all_financials: dict, date_index: pd.Datet
         "debt_ratio": debt_ratio,
         "revenue_yoy": rev_yoy,
         "ni_yoy": ni_yoy,
-        "bvps": bvps_s,   # 每股淨值，給 build_feature_matrix 計算 PB
+        "bvps": bvps_s,
     }
 
 
@@ -247,12 +258,11 @@ def _get_chip_features(symbol: str, all_inst: pd.DataFrame, all_margin: pd.DataF
     if not all_inst.empty:
         inst = all_inst[all_inst["symbol"] == symbol].set_index("date")
         inst = inst.reindex(date_index)
-        result["foreign_net_5d"] = inst["foreign_net"].rolling(5).sum()
-        result["trust_net_5d"] = inst["trust_net"].rolling(5).sum()
-        result["total_inst_5d"] = inst["total_net"].rolling(5).sum()
-        # 中長期籌碼：60 日累計（約 1 季，確認法人真正在建倉）
+        result["foreign_net_5d"]  = inst["foreign_net"].rolling(5).sum()
+        result["trust_net_5d"]    = inst["trust_net"].rolling(5).sum()
+        result["total_inst_5d"]   = inst["total_net"].rolling(5).sum()
         result["foreign_net_60d"] = inst["foreign_net"].rolling(60).sum()
-        result["trust_net_60d"] = inst["trust_net"].rolling(60).sum()
+        result["trust_net_60d"]   = inst["trust_net"].rolling(60).sum()
 
     if not all_margin.empty:
         mg = all_margin[all_margin["symbol"] == symbol].set_index("date")
@@ -262,13 +272,13 @@ def _get_chip_features(symbol: str, all_inst: pd.DataFrame, all_margin: pd.DataF
         mb5 = mb.shift(5)
         sb5 = sb.shift(5)
         result["margin_balance_chg"] = (mb - mb5) / mb5.replace(0, np.nan) * 100
-        result["short_balance_chg"] = (sb - sb5) / sb5.replace(0, np.nan) * 100
+        result["short_balance_chg"]  = (sb - sb5) / sb5.replace(0, np.nan) * 100
 
     return result
 
 
 def _get_fund_features(symbol: str, conn, price: float | None = None) -> dict:
-    """用於 rule_engine / predict 的即時基本面（非訓練用，取最新已有資料）"""
+    """用於 rule_engine / predict 的即時基本面（取最新已有資料）"""
     rows = conn.execute(
         "SELECT revenue, net_income, eps, equity, total_assets, total_debt FROM financials WHERE symbol=? ORDER BY year DESC, quarter DESC LIMIT 8",
         (symbol,)
@@ -277,18 +287,17 @@ def _get_fund_features(symbol: str, conn, price: float | None = None) -> dict:
     if not rows:
         return result
     rows = [dict(r) for r in rows]
-    ni_list = [r["net_income"] for r in rows[:4] if r["net_income"] is not None]
-    equity = rows[0].get("equity")
-    ni_q = rows[0].get("net_income")
-    eps_q = rows[0].get("eps")
-    # 推算股數（用於補算 eps=None 的季度）
-    shares = None
+
+    # 股數：用4季中位數
+    shares_candidates = []
     for r in rows[:4]:
         if r.get("eps") and r["eps"] != 0 and r.get("net_income"):
-            shares = r["net_income"] / r["eps"]
-            if shares > 0:
-                break
-    # EPS TTM：eps=None 但有 net_income 時用股數反推
+            s = r["net_income"] / r["eps"]
+            if s > 0:
+                shares_candidates.append(s)
+    shares = float(np.median(shares_candidates)) if shares_candidates else None
+
+    # EPS TTM
     eps_parts = []
     for r in rows[:4]:
         if r.get("eps") is not None:
@@ -297,12 +306,21 @@ def _get_fund_features(symbol: str, conn, price: float | None = None) -> dict:
             eps_parts.append(r["net_income"] / shares)
     if eps_parts:
         result["eps_ttm"] = sum(eps_parts)
-    if ni_list and equity and equity > 0:
-        result["roe"] = sum(ni_list) / equity * 100
+
+    # ROE：TTM淨利 / 平均equity（最新季 + 前一季平均）
+    ni_list = [r["net_income"] for r in rows[:4] if r["net_income"] is not None]
+    equity_cur  = rows[0].get("equity")
+    equity_prev = rows[1].get("equity") if len(rows) > 1 else None
+    if ni_list and equity_cur and equity_cur > 0:
+        avg_equity = (equity_cur + equity_prev) / 2 if equity_prev and equity_prev > 0 else equity_cur
+        result["roe"] = sum(ni_list) / avg_equity * 100
+
     if rows[0].get("total_assets") and rows[0]["total_assets"] > 0 and rows[0].get("total_debt") is not None:
         result["debt_ratio"] = rows[0]["total_debt"] / rows[0]["total_assets"] * 100
+
     if len(rows) >= 5 and rows[0].get("revenue") and rows[4].get("revenue") and rows[4]["revenue"] > 0:
         result["revenue_yoy"] = (rows[0]["revenue"] - rows[4]["revenue"]) / rows[4]["revenue"] * 100
+
     if len(rows) >= 5 and rows[0].get("net_income") and rows[4].get("net_income"):
         base_ni = rows[0]["net_income"]
         prev_ni = rows[4]["net_income"]
@@ -310,14 +328,16 @@ def _get_fund_features(symbol: str, conn, price: float | None = None) -> dict:
             yoy = (base_ni - prev_ni) / prev_ni * 100
             if yoy <= 500:
                 result["ni_yoy"] = yoy
+
     # PE / PB（需要股價）
     if price and price > 0:
         eps_ttm = result.get("eps_ttm")
+        # 負 EPS 時 PE 設為 NaN
         if eps_ttm and eps_ttm > 0:
             result["pe_ratio"] = price / eps_ttm
-        if ni_q and eps_q and eps_q != 0 and equity and equity > 0:
-            shares = ni_q / eps_q
-            if shares > 0:
-                bvps = equity / shares
+        if shares and shares > 0 and equity_cur and equity_cur > 0:
+            bvps = equity_cur / shares
+            if bvps > 0:
                 result["pb_ratio"] = price / bvps
+
     return result

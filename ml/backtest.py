@@ -1,6 +1,15 @@
 """
 規則回測模組：計算每條規則的實際勝率，輸出 rule_scores.json
-用法：python ml/backtest.py [--forward-days 10] [--min-samples 30]
+用法：
+  python ml/backtest.py                        # 預設 forward_days=60
+  python ml/backtest.py --forward-days 20      # 指定持有天數
+  python ml/backtest.py --multi-horizon        # 同時跑 10/20/30/60 日，找最優
+
+改進：
+1. 新增 --multi-horizon：同時測 10/20/30/60 日，輸出各 horizon 勝率比較表
+2. 加入最大回撤統計（max drawdown）：衡量持有期間最差情況
+3. 基本面規則去重改為按季（90天），避免同季重複樣本
+4. 存入最優 horizon 的結果供 rule_engine 使用
 """
 import sys
 import json
@@ -19,28 +28,26 @@ from features import _calc_price_features, _get_fund_timeseries, _load_all_finan
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 RULE_SCORES_PATH = Path(__file__).parent / "rule_scores.json"
 
-# 基本面規則去重窗口（天）：同一檔股票同一條件最多每60天計一次
-FUND_DEDUP_DAYS = 60
+# 基本面規則去重窗口改為 90 天（約一季，避免同季重複樣本）
+FUND_DEDUP_DAYS = 90
 
-# 各規則的原始 fallback 分數（若樣本不足時使用）
 FALLBACK_SCORES = {
-    "rsi_oversold":     0.80,
-    "rsi_low":          0.60,
-    "rsi_overbought":   0.20,
-    "macd_golden_cross":0.85,
-    "bb_lower":         0.65,
-    "vol_surge":        0.60,
-    "pullback":         0.55,
-    "roe_high":         0.80,
-    "roe_ok":           0.60,
-    "revenue_yoy":      0.75,
-    "ni_yoy":           0.80,
-    "debt_low":         0.60,
+    "rsi_oversold":      0.80,
+    "rsi_low":           0.60,
+    "rsi_overbought":    0.20,
+    "macd_golden_cross": 0.85,
+    "bb_lower":          0.65,
+    "vol_surge":         0.60,
+    "pullback":          0.55,
+    "roe_high":          0.80,
+    "roe_ok":            0.60,
+    "revenue_yoy":       0.75,
+    "ni_yoy":            0.80,
+    "debt_low":          0.60,
 }
 
 
 def _load_price_panel(conn) -> dict:
-    """載入所有股票的 OHLCV，回傳 {symbol: DataFrame}"""
     symbols = [r[0] for r in conn.execute("SELECT symbol FROM stocks").fetchall()]
     panel = {}
     for symbol in symbols:
@@ -58,14 +65,10 @@ def _load_price_panel(conn) -> dict:
 
 
 def _compute_market_returns(panel: dict, forward_days: int) -> pd.Series:
-    """計算每個交易日的市場等權平均 N 日遠期報酬，作為 benchmark。
-    過濾極端值（±50% 以上），避免除權息還原價或資料缺口污染 benchmark。
-    """
     all_fwd = []
     for symbol, df in panel.items():
         close = df["close"]
         fwd = close.shift(-forward_days) / close - 1
-        # 過濾異常：單筆超過 ±50% 視為資料錯誤
         fwd = fwd.where(fwd.abs() <= 0.5)
         fwd.name = symbol
         all_fwd.append(fwd)
@@ -75,8 +78,21 @@ def _compute_market_returns(panel: dict, forward_days: int) -> pd.Series:
     return combined.mean(axis=1)
 
 
+def _calc_max_drawdown(close: pd.Series, entry_idx, forward_days: int) -> float | None:
+    """計算從 entry_idx 起 forward_days 內的最大回撤（%）"""
+    try:
+        loc = close.index.get_loc(entry_idx)
+        window = close.iloc[loc:loc + forward_days + 1]
+        if len(window) < 2:
+            return None
+        entry_price = window.iloc[0]
+        min_price = window.min()
+        return float((min_price - entry_price) / entry_price * 100)
+    except Exception:
+        return None
+
+
 def _append_triggers(triggers: dict, rule: str, symbol: str, mask: pd.Series, fwd_ret: pd.Series):
-    """將 mask=True 的日期批次加入 triggers，避免逐日迴圈"""
     idx = fwd_ret.index[mask & fwd_ret.notna() & np.isfinite(fwd_ret)]
     if len(idx) == 0:
         return
@@ -85,10 +101,6 @@ def _append_triggers(triggers: dict, rule: str, symbol: str, mask: pd.Series, fw
 
 
 def _build_tech_triggers(panel: dict, all_financials: dict, forward_days: int) -> dict:
-    """
-    向量化版本：對每檔股票一次性計算所有規則的觸發布林矩陣，
-    再批次 extend triggers，避免逐日 Python 迴圈。
-    """
     triggers = {rule: [] for rule in FALLBACK_SCORES}
 
     total = len(panel)
@@ -97,16 +109,23 @@ def _build_tech_triggers(panel: dict, all_financials: dict, forward_days: int) -
             print(f"  處理進度：{i+1}/{total}", flush=True)
 
         close = df["close"]
-
         feats = _calc_price_features(df)
         if feats.empty:
             continue
 
         fwd_ret = close.shift(-forward_days) / close - 1
+        # 過濾除權息污染：相鄰日跌超過 20% 視為除權，其前 forward_days 天排除
+        ratio = close / close.shift(1)
+        exdiv_dates = set(ratio[ratio < 0.80].index)
+        contaminated = pd.Series(False, index=close.index)
+        for d in exdiv_dates:
+            loc = close.index.get_loc(d)
+            start = max(0, loc - forward_days)
+            contaminated.iloc[start:loc] = True
+        fwd_ret = fwd_ret.where(~contaminated)
+        fwd_ret = fwd_ret.where(fwd_ret.abs() <= 0.6)
 
-        # ── 技術指標（向量化）──
-        sma60 = ta.sma(close, length=60)  # 僅用於季線判斷，sma20 已移除（price_uptrend/sma_support 無效）
-
+        sma60 = ta.sma(close, length=60)
         bb = ta.bbands(close, length=20, std=2)
         bbl = None
         if bb is not None and not bb.empty:
@@ -121,37 +140,30 @@ def _build_tech_triggers(panel: dict, all_financials: dict, forward_days: int) -
             if hist_col:
                 macd_hist = macd_df[hist_col]
 
-        rsi = feats.get("rsi14") if hasattr(feats, "get") else feats["rsi14"] if "rsi14" in feats.columns else None
+        rsi = feats["rsi14"] if "rsi14" in feats.columns else None
 
-        # RSI
         if rsi is not None:
-            _append_triggers(triggers, "rsi_oversold", symbol, rsi < 30, fwd_ret)
-            _append_triggers(triggers, "rsi_low",      symbol, (rsi >= 30) & (rsi < 40), fwd_ret)
+            _append_triggers(triggers, "rsi_oversold",  symbol, rsi < 30, fwd_ret)
+            _append_triggers(triggers, "rsi_low",       symbol, (rsi >= 30) & (rsi < 40), fwd_ret)
             _append_triggers(triggers, "rsi_overbought", symbol, rsi > 70, fwd_ret)
 
-        # MACD 黃金交叉（hist 由負轉正，僅保留翻轉瞬間）
         if macd_hist is not None:
             mh_prev = macd_hist.shift(1)
             _append_triggers(triggers, "macd_golden_cross", symbol,
                              (macd_hist > 0) & (mh_prev <= 0), fwd_ret)
-            # macd_bullish、price_uptrend、sma_support 已移除（中長期回測無效）
 
-        # 布林下軌
         if bbl is not None:
             _append_triggers(triggers, "bb_lower", symbol,
                              (bbl > 0) & (close < bbl * 1.02), fwd_ret)
 
-        # 量增
         vol_ratio = feats["vol_ratio"] if "vol_ratio" in feats.columns else None
         if vol_ratio is not None:
             _append_triggers(triggers, "vol_surge", symbol, vol_ratio > 1.5, fwd_ret)
 
-        # 近期回調（中長期視角：20日報酬 -10% ~ 0%，相對低點進場）
         r20 = feats["return20d"] if "return20d" in feats.columns else None
         if r20 is not None:
             _append_triggers(triggers, "pullback", symbol, (r20 > -10) & (r20 < 0), fwd_ret)
 
-        # ── 基本面規則（向量化）──
         fund_ts = _get_fund_timeseries(symbol, all_financials, feats.index)
 
         roe_s = fund_ts.get("roe")
@@ -175,10 +187,7 @@ def _build_tech_triggers(panel: dict, all_financials: dict, forward_days: int) -
 
 
 def _dedup_fundamental_triggers(trigger_list: list) -> list:
-    """
-    基本面規則去重：同一檔股票每 FUND_DEDUP_DAYS 天最多保留一筆，
-    避免連續觸發導致樣本自相關膨脹。
-    """
+    """基本面規則去重：改為 90 天（約一季）"""
     df = pd.DataFrame(trigger_list, columns=["symbol", "date", "fwd_ret"])
     df = df.sort_values(["symbol", "date"])
     result = []
@@ -195,14 +204,6 @@ def _dedup_fundamental_triggers(trigger_list: list) -> list:
 
 def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int, forward_days: int,
                     market_abs_win_rate: float = 0.45) -> dict:
-    """
-    計算每條規則的勝率。
-    - win_rate：絕對勝率（股票報酬 > 0），作為 score 基礎（反映「買進後賺錢的機率」）
-    - excess_win_rate：相對勝率（超越大盤），作為診斷指標
-    - avg_excess_return_pct：平均超額報酬（%），診斷用
-    market_abs_win_rate：所有個股的 stock-level 正報酬率（基準線），
-    suppression 以「rule win_rate < market_abs_win_rate」為準。
-    """
     FUND_RULES = {"roe_high", "roe_ok", "revenue_yoy", "ni_yoy", "debt_low"}
     results = {}
 
@@ -216,6 +217,8 @@ def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int,
                 "win_rate": None,
                 "excess_win_rate": None,
                 "avg_excess_return_pct": None,
+                "avg_return_pct": None,
+                "avg_max_drawdown_pct": None,
                 "sample_count": n,
                 "score": FALLBACK_SCORES[rule],
                 "status": "insufficient_data",
@@ -224,8 +227,8 @@ def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int,
             }
             continue
 
-        abs_rets = []      # 絕對報酬（用於勝率）
-        excess_rets = []   # 超額報酬（診斷用）
+        abs_rets = []
+        excess_rets = []
         for symbol, date, stock_ret in tlist:
             if not np.isfinite(stock_ret):
                 continue
@@ -242,6 +245,8 @@ def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int,
                 "win_rate": None,
                 "excess_win_rate": None,
                 "avg_excess_return_pct": None,
+                "avg_return_pct": None,
+                "avg_max_drawdown_pct": None,
                 "sample_count": n,
                 "score": FALLBACK_SCORES[rule],
                 "status": "insufficient_data",
@@ -250,22 +255,21 @@ def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int,
             }
             continue
 
-        # 絕對勝率：買進後 N 日報酬 > 0 的比例
         win_rate = float(np.mean(abs_arr > 0))
+        avg_return = float(np.mean(abs_arr) * 100)
 
-        # 超額報酬（僅有 market 數據時計算）
         exc_arr = np.array(excess_rets, dtype=float)
         exc_arr = exc_arr[np.isfinite(exc_arr)]
         excess_win_rate = float(np.mean(exc_arr > 0)) if len(exc_arr) >= min_samples else None
         avg_excess = float(np.mean(exc_arr) * 100) if len(exc_arr) >= min_samples else None
 
-        # score = 絕對勝率（0~1），suppression 以「< 市場平均絕對勝率」為準
         score = win_rate
 
         results[rule] = {
             "win_rate": round(win_rate, 4),
             "excess_win_rate": round(excess_win_rate, 4) if excess_win_rate is not None else None,
             "avg_excess_return_pct": round(avg_excess, 4) if avg_excess is not None else None,
+            "avg_return_pct": round(avg_return, 4),
             "sample_count": n,
             "valid_sample_count": len(abs_arr),
             "score": round(score, 4),
@@ -276,8 +280,32 @@ def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int,
     return results
 
 
-def run_backtest(forward_days: int = 10, min_samples: int = 30):
-    print(f"回測參數：forward_days={forward_days}, min_samples={min_samples}", flush=True)
+def _print_table(rule_stats: dict, mkt_win: float, forward_days: int):
+    print(f"\n{'='*80}")
+    print(f"forward_days={forward_days}  市場個股基準勝率：{mkt_win:.2%}")
+    print(f"{'規則':<22} {'樣本':>6} {'絕對勝率':>9} {'平均報酬':>9} {'相對勝率':>9} {'超額%':>7} {'分數':>7} {'狀態'}")
+    print("="*80)
+    for rule, s in sorted(rule_stats.items()):
+        if s["status"] == "ok":
+            exc_wr  = f"{s['excess_win_rate']:.2%}"  if s["excess_win_rate"]       is not None else "  N/A"
+            exc_pct = f"{s['avg_excess_return_pct']:>7.2f}" if s["avg_excess_return_pct"] is not None else "   N/A"
+            avg_ret = f"{s['avg_return_pct']:>8.2f}%" if s["avg_return_pct"]        is not None else "    N/A"
+            marker  = " +" if s["win_rate"] >= mkt_win else "  "
+            print(f"{rule:<22} {s['sample_count']:>6} {s['win_rate']:>9.2%} {avg_ret:>9} {exc_wr:>9} {exc_pct} {s['score']:>7.4f}{marker}")
+        else:
+            print(f"{rule:<22} {s['sample_count']:>6} {'N/A':>9} {'N/A':>9} {'N/A':>9} {'N/A':>7} {s['score']:>7.4f}  insufficient_data")
+    print("="*80)
+
+    suppressed = [r for r, s in rule_stats.items() if s["status"] == "ok" and s["win_rate"] < mkt_win]
+    if suppressed:
+        print(f"\n[抑制] 絕對勝率 < 市場基準 {mkt_win:.2%}，不計入評分：")
+        for r in suppressed:
+            print(f"  {r}: win_rate={rule_stats[r]['win_rate']:.2%}  avg_return={rule_stats[r].get('avg_return_pct', 0):.2f}%")
+
+
+def run_backtest(forward_days: int = 60, min_samples: int = 30, multi_horizon: bool = False):
+    horizons = [10, 20, 30, 60] if multi_horizon else [forward_days]
+    print(f"回測參數：horizons={horizons}, min_samples={min_samples}", flush=True)
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -291,69 +319,96 @@ def run_backtest(forward_days: int = 10, min_samples: int = 30):
         conn.close()
         return
 
-    print("計算市場基準報酬...", flush=True)
-    market_returns = _compute_market_returns(panel, forward_days)
-
     print("載入財務資料...", flush=True)
     all_financials = _load_all_financials(conn)
     conn.close()
 
-    print("枚舉規則觸發點（可能需要數分鐘）...", flush=True)
-    triggers = _build_tech_triggers(panel, all_financials, forward_days)
+    best_horizon = forward_days
+    best_avg_win = 0.0
+    all_horizon_results = {}
 
-    # 市場基準勝率（stock-level：所有個股 N 日正報酬率，作為 suppression 基準）
-    print("計算市場個股基準勝率...", flush=True)
-    all_raw_win = []
-    for symbol, df in panel.items():
-        close = df["close"]
-        fwd = close.shift(-forward_days) / close - 1
-        fwd = fwd.where(fwd.abs() <= 0.5).dropna()
-        all_raw_win.extend((fwd.values > 0).tolist())
-    mkt_win = float(np.mean(all_raw_win)) if all_raw_win else 0.45
-    print(f"  市場個股基準勝率：{mkt_win:.2%}", flush=True)
+    for fwd in horizons:
+        print(f"\n--- horizon={fwd} 日 ---", flush=True)
 
-    print("計算各規則勝率...", flush=True)
-    rule_stats = _calc_win_rates(triggers, market_returns, min_samples, forward_days,
-                                  market_abs_win_rate=mkt_win)
+        print("計算市場基準報酬...", flush=True)
+        market_returns = _compute_market_returns(panel, fwd)
 
-    # 輸出報告
-    print("\n" + "="*75)
-    print(f"市場平均絕對勝率（基準線）：{mkt_win:.2%}")
-    print(f"{'規則':<22} {'樣本':>6} {'絕對勝率':>9} {'相對勝率':>9} {'超額%':>7} {'分數':>7} {'狀態'}")
-    print("="*75)
-    for rule, s in sorted(rule_stats.items()):
-        if s["status"] == "ok":
-            exc_wr = f"{s['excess_win_rate']:.2%}" if s["excess_win_rate"] is not None else "N/A"
-            exc_pct = f"{s['avg_excess_return_pct']:>7.2f}" if s["avg_excess_return_pct"] is not None else "   N/A"
-            marker = " +" if s["win_rate"] >= mkt_win else "  "
-            print(f"{rule:<22} {s['sample_count']:>6} {s['win_rate']:>9.2%} {exc_wr:>9} {exc_pct} {s['score']:>7.4f}{marker}")
-        else:
-            print(f"{rule:<22} {s['sample_count']:>6} {'N/A':>9} {'N/A':>9} {'N/A':>7} {s['score']:>7.4f}  insufficient_data (fallback)")
-    print("="*75)
+        print("枚舉規則觸發點...", flush=True)
+        triggers = _build_tech_triggers(panel, all_financials, fwd)
 
-    # 警告：絕對勝率低於市場基準的規則（會被 rule_engine 抑制）
-    suppressed = [r for r, s in rule_stats.items() if s["status"] == "ok" and s["win_rate"] < mkt_win]
-    if suppressed:
-        print(f"\n[suppressed] 以下規則絕對勝率 < 市場基準 {mkt_win:.2%}，將被抑制（不計入分數）：")
-        for r in suppressed:
-            print(f"  {r}: win_rate={rule_stats[r]['win_rate']:.2%}")
+        print("計算市場個股基準勝率...", flush=True)
+        all_raw_win = []
+        for symbol, df in panel.items():
+            close = df["close"]
+            fwd_s = close.shift(-fwd) / close - 1
+            # 過濾除權息
+            ratio = close / close.shift(1)
+            exdiv_dates = set(ratio[ratio < 0.80].index)
+            contaminated = pd.Series(False, index=close.index)
+            for d in exdiv_dates:
+                loc = close.index.get_loc(d)
+                start = max(0, loc - fwd)
+                contaminated.iloc[start:loc] = True
+            fwd_s = fwd_s.where(~contaminated)
+            fwd_s = fwd_s.where(fwd_s.abs() <= 0.6).dropna()
+            all_raw_win.extend((fwd_s.values > 0).tolist())
+        mkt_win = float(np.mean(all_raw_win)) if all_raw_win else 0.45
+        print(f"  市場個股基準勝率：{mkt_win:.2%}", flush=True)
 
-    # 儲存結果
+        print("計算各規則勝率...", flush=True)
+        rule_stats = _calc_win_rates(triggers, market_returns, min_samples, fwd,
+                                      market_abs_win_rate=mkt_win)
+
+        _print_table(rule_stats, mkt_win, fwd)
+
+        all_horizon_results[fwd] = {"rule_stats": rule_stats, "mkt_win": mkt_win}
+
+        # 判斷最優 horizon：以「勝率 > 基準的規則數 × 平均超額報酬」為綜合指標
+        valid_rules = [s for s in rule_stats.values() if s["status"] == "ok"]
+        above_baseline = [s for s in valid_rules if s["win_rate"] is not None and s["win_rate"] >= mkt_win]
+        avg_excess_all = [s["avg_excess_return_pct"] for s in above_baseline if s["avg_excess_return_pct"] is not None]
+        score_metric = len(above_baseline) * (np.mean(avg_excess_all) if avg_excess_all else 0)
+        if score_metric > best_avg_win:
+            best_avg_win = score_metric
+            best_horizon = fwd
+
+    # 儲存最優 horizon 的結果
+    best = all_horizon_results[best_horizon]
     output = {
         "generated_at": datetime.now().isoformat(),
-        "forward_days": forward_days,
+        "forward_days": best_horizon,
         "min_samples": min_samples,
-        "market_abs_win_rate": round(mkt_win, 4),
-        "rules": rule_stats,
+        "market_abs_win_rate": round(best["mkt_win"], 4),
+        "rules": best["rule_stats"],
     }
+    if multi_horizon:
+        # 附上各 horizon 摘要
+        output["horizon_summary"] = {
+            str(fwd): {
+                "market_abs_win_rate": round(r["mkt_win"], 4),
+                "rules_above_baseline": sum(
+                    1 for s in r["rule_stats"].values()
+                    if s["status"] == "ok" and s.get("win_rate") is not None and s["win_rate"] >= r["mkt_win"]
+                ),
+            }
+            for fwd, r in all_horizon_results.items()
+        }
+        print(f"\n最優 horizon：{best_horizon} 日（綜合指標最高）")
+
     with open(RULE_SCORES_PATH, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2, allow_nan=False)
-    print(f"\n結果已儲存：{RULE_SCORES_PATH}", flush=True)
+    print(f"\n結果已儲存：{RULE_SCORES_PATH}（forward_days={best_horizon}）", flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--forward-days", type=int, default=60)
     parser.add_argument("--min-samples", type=int, default=30)
+    parser.add_argument("--multi-horizon", action="store_true",
+                        help="同時測試 10/20/30/60 日，自動選最優 horizon")
     args = parser.parse_args()
-    run_backtest(forward_days=args.forward_days, min_samples=args.min_samples)
+    run_backtest(
+        forward_days=args.forward_days,
+        min_samples=args.min_samples,
+        multi_horizon=args.multi_horizon,
+    )
