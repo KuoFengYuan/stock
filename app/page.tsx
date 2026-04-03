@@ -35,6 +35,8 @@ export default function HomePage() {
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null)
   const [lastAnalyzeTime, setLastAnalyzeTime] = useState<string | null>(null)
   const [log, setLog] = useState('')
+  const [syncProgress, setSyncProgress] = useState<number | null>(null)
+  const [syncPhase, setSyncPhase] = useState('')
 
   const syncElapsed = useTimer(syncing)
   const analyzeElapsed = useTimer(analyzing)
@@ -55,14 +57,50 @@ export default function HomePage() {
   async function handleSync() {
     setSyncing(true)
     setLog('')
+    setSyncProgress(null)
+    setSyncPhase('初始化...')
     const start = Date.now()
     try {
       const res = await fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'all' }) })
-      const json = await res.json()
-      setLog(json.output || json.error || '完成')
-      const took = Math.floor((Date.now() - start) / 1000)
-      setLastSyncTime(`${new Date().toLocaleTimeString('zh-TW')}（耗時 ${formatElapsed(took)}）`)
-      await fetchRecommendations()
+      if (!res.body) return
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const msg = JSON.parse(line)
+            if (msg.type === 'line') {
+              const text: string = msg.text
+              setLog(prev => prev + text + '\n')
+              // 解析進度：「下載進度 xxx/xxx (xx%)」
+              const m = text.match(/下載進度\s+\d+\/\d+\s+\((\d+)%\)/)
+              if (m) {
+                setSyncProgress(parseInt(m[1]))
+                setSyncPhase('下載歷史資料')
+              } else if (text.includes('規則分析')) {
+                setSyncPhase('規則分析')
+                setSyncProgress(null)
+              } else if (text.includes('財務報表')) {
+                setSyncPhase('同步財務報表')
+                setSyncProgress(null)
+              }
+            } else if (msg.type === 'done') {
+              const took = Math.floor((Date.now() - start) / 1000)
+              setLastSyncTime(`${new Date().toLocaleTimeString('zh-TW')}（耗時 ${formatElapsed(took)}）`)
+              setSyncProgress(100)
+              setSyncPhase('完成')
+              await fetchRecommendations()
+            }
+          } catch { /* 非 JSON 行忽略 */ }
+        }
+      }
     } finally {
       setSyncing(false)
     }
@@ -100,6 +138,7 @@ export default function HomePage() {
             >
               {syncing ? `同步中… ${formatElapsed(syncElapsed)}` : '同步資料'}
             </button>
+
             <button
               onClick={() => handleAnalyze('rule')}
               disabled={syncing || analyzing}
@@ -115,6 +154,24 @@ export default function HomePage() {
               {analyzing ? `分析中… ${formatElapsed(analyzeElapsed)}` : 'AI 分析'}
             </button>
           </div>
+          {syncing && (
+            <div className="w-full">
+              <div className="flex justify-between text-xs text-slate-400 mb-1">
+                <span>{syncPhase}</span>
+                {syncProgress !== null && <span>{syncProgress}%</span>}
+              </div>
+              <div className="w-full h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                {syncProgress !== null ? (
+                  <div
+                    className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                    style={{ width: `${syncProgress}%` }}
+                  />
+                ) : (
+                  <div className="h-full bg-blue-500 rounded-full animate-pulse" style={{ width: '100%' }} />
+                )}
+              </div>
+            </div>
+          )}
           <div className="text-xs text-slate-500 text-right space-y-0.5">
             {lastSyncTime && <div>最後同步：{lastSyncTime}</div>}
             {lastAnalyzeTime && <div>最後分析：{lastAnalyzeTime}</div>}

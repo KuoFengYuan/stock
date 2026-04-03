@@ -34,3 +34,51 @@ export function runPythonScript(scriptName: string, args: string[] = []): Promis
     })
   })
 }
+
+/**
+ * 串流執行 Python 腳本，每行 stdout 即時透過 onLine 回呼推送。
+ * 回傳 Promise<RunResult>（腳本結束後 resolve）。
+ */
+export function streamPythonScript(
+  scriptName: string,
+  args: string[],
+  onLine: (line: string) => void,
+): Promise<RunResult> {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(process.cwd(), 'ml', scriptName)
+    const proc = spawn('python', [scriptPath, ...args], {
+      cwd: process.cwd(),
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    })
+
+    let output = ''
+    let errorOutput = ''
+    let buf = ''
+
+    proc.stdout.on('data', (data: Buffer) => {
+      const chunk = data.toString('utf-8')
+      output += chunk
+      buf += chunk
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        onLine(line)
+      }
+    })
+
+    proc.stderr.on('data', (data: Buffer) => { errorOutput += data.toString('utf-8') })
+
+    proc.on('close', (code) => {
+      if (buf) onLine(buf)
+      if (code === 0) {
+        resolve({ success: true, output })
+      } else {
+        resolve({ success: false, output, error: errorOutput || `exit code ${code}` })
+      }
+    })
+
+    proc.on('error', (err) => {
+      resolve({ success: false, output, error: err.message })
+    })
+  })
+}

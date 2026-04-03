@@ -1,8 +1,7 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { runPythonScript } from '@/lib/analysis/ml-runner'
+import { NextRequest } from 'next/server'
+import { streamPythonScript } from '@/lib/analysis/ml-runner'
 import { getDb } from '@/lib/db'
 
-// 季報最短重新同步間隔（毫秒）：7 天
 const FINANCIALS_MIN_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
 
 function getLastFinancialsSync(): number | null {
@@ -15,45 +14,74 @@ function getLastFinancialsSync(): number | null {
 
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}))
-  let mode = body.mode || 'all' // "prices" | "financials" | "all"
-  const force = body.force === true // 強制重新同步季報
+  let mode = body.mode || 'all'
+  const force = body.force === true
 
   let skippedFinancials = false
 
-  // 若 mode 包含 financials，檢查是否在間隔內
   if ((mode === 'financials' || mode === 'all') && !force) {
     const lastSync = getLastFinancialsSync()
     if (lastSync && Date.now() - lastSync < FINANCIALS_MIN_INTERVAL_MS) {
       const daysSince = Math.floor((Date.now() - lastSync) / (1000 * 60 * 60 * 24))
       if (mode === 'financials') {
-        return NextResponse.json({
+        const msg = JSON.stringify({
+          type: 'done',
           success: true,
-          output: `季報在 ${daysSince} 天前已同步，略過（距下次可同步還有 ${7 - daysSince} 天）。傳入 force:true 可強制執行。`,
           skippedFinancials: true,
+          output: `季報在 ${daysSince} 天前已同步，略過（距下次可同步還有 ${7 - daysSince} 天）。傳入 force:true 可強制執行。`,
         })
+        return new Response(msg + '\n', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
       }
-      // mode === 'all'：降級為只同步價格
       mode = 'prices'
       skippedFinancials = true
     }
   }
 
-  const syncResult = await runPythonScript('sync.py', [mode])
-  let output = syncResult.output
-  if (skippedFinancials) {
-    output = '（季報近期已同步，本次僅更新價格）\n' + output
-  }
+  const encoder = new TextEncoder()
 
-  // 同步完後自動跑規則分析，更新推薦
-  if (syncResult.success) {
-    const analyzeResult = await runPythonScript('rule_engine.py')
-    output += '\n--- 規則分析 ---\n' + analyzeResult.output
-  }
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (obj: object) => {
+        controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
+      }
 
-  return NextResponse.json({
-    success: syncResult.success,
-    output,
-    error: syncResult.error,
-    skippedFinancials,
+      if (skippedFinancials) {
+        send({ type: 'line', text: '（季報近期已同步，本次僅更新價格）' })
+      }
+
+      // 串流 sync.py
+      let syncSuccess = true
+      let syncOutput = ''
+      await streamPythonScript('sync.py', [mode], (line) => {
+        syncOutput += line + '\n'
+        send({ type: 'line', text: line })
+      }).then((result) => {
+        syncSuccess = result.success
+        if (!result.success && result.error) {
+          send({ type: 'line', text: `[ERROR] ${result.error}` })
+        }
+      })
+
+      // 成功後跑規則分析
+      if (syncSuccess) {
+        send({ type: 'line', text: '--- 規則分析 ---' })
+        let ruleOutput = ''
+        await streamPythonScript('rule_engine.py', [], (line) => {
+          ruleOutput += line + '\n'
+          send({ type: 'line', text: line })
+        })
+        syncOutput += '\n--- 規則分析 ---\n' + ruleOutput
+      }
+
+      send({ type: 'done', success: syncSuccess, skippedFinancials })
+      controller.close()
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'X-Content-Type-Options': 'nosniff',
+    },
   })
 }
