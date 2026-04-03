@@ -45,11 +45,18 @@ FALLBACK_SCORES = {
     "revenue_yoy":       0.75,
     "ni_yoy":            0.80,
     "debt_low":          0.60,
-    # 月營收規則（之前缺失，導致 rule_engine 永遠用 fallback）
+    # 月營收規則
     "rev_yoy_6m":        0.75,
     "rev_yoy_3m":        0.65,
     "rev_mom_3m":        0.60,
     "rev_accel":         0.60,
+    # 華爾街策略
+    "piotroski_high":    0.70,   # Piotroski F-Score >= 5/6
+    "piotroski_ok":      0.55,   # Piotroski F-Score >= 4/6
+    "minervini_strong":  0.65,   # Minervini 趨勢模板 >= 7/8
+    "minervini_ok":      0.55,   # Minervini >= 5/8
+    "rs_high":           0.65,   # 相對強度 >= 80%
+    "peg_value":         0.65,   # PEG < 1.0
 }
 
 # 回測結果可信度門檻：樣本不足時降低權重而非直接採用

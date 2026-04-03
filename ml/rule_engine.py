@@ -21,6 +21,10 @@ import pandas as pd
 import numpy as np
 import pandas_ta as ta
 
+sys.path.insert(0, str(Path(__file__).parent))
+from fundamentals import calc_fundamentals
+from strategies import calc_piotroski, calc_peg, calc_minervini
+
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 RULE_SCORES_PATH = Path(__file__).parent / "rule_scores.json"
 
@@ -116,113 +120,35 @@ def calc_indicators(df: pd.DataFrame) -> dict:
     if len(close) >= 61:
         result["return60d"] = float((close.iloc[-1] - close.iloc[-61]) / close.iloc[-61] * 100)
 
+    # Minervini 趨勢模板所需均線
+    sma50 = ta.sma(close, length=50)
+    sma150 = ta.sma(close, length=150)
+    sma200 = ta.sma(close, length=200)
+    if sma50 is not None and len(sma50.dropna()) > 0:
+        result["sma50"] = float(sma50.iloc[-1]) if not pd.isna(sma50.iloc[-1]) else None
+    if sma150 is not None and len(sma150.dropna()) > 0:
+        result["sma150"] = float(sma150.iloc[-1]) if not pd.isna(sma150.iloc[-1]) else None
+    if sma200 is not None and len(sma200.dropna()) > 0:
+        result["sma200"] = float(sma200.iloc[-1]) if not pd.isna(sma200.iloc[-1]) else None
+        # SMA200 一個月前的值（判斷是否上升趨勢）
+        if len(sma200.dropna()) >= 22:
+            result["sma200_1m_ago"] = float(sma200.dropna().iloc[-22])
+
+    # 52 週低點
+    if len(close) >= 250:
+        result["low_1y"] = float(df["low"].tail(250).min())
+    elif len(close) >= 60:
+        result["low_1y"] = float(df["low"].min())
+
+    # 12-1 月動量（CANSLIM RS 用，跳過最近 1 個月避免短期反轉）
+    if len(close) >= 252:
+        result["momentum_12_1"] = float((close.iloc[-22] / close.iloc[-252] - 1) * 100)
+    elif len(close) >= 126:
+        result["momentum_12_1"] = float((close.iloc[-22] / close.iloc[0] - 1) * 100)
+
     result["close"] = float(close.iloc[-1])
     result["volume"] = int(df["volume"].iloc[-1])
 
-    return result
-
-
-def calc_fundamentals(symbol: str, conn) -> dict:
-    """計算基本面指標"""
-    rows = conn.execute(
-        """SELECT year, quarter, revenue, net_income, eps, equity, total_assets, total_debt
-           FROM financials WHERE symbol=? ORDER BY year DESC, quarter DESC LIMIT 8""",
-        (symbol,)
-    ).fetchall()
-
-    if not rows:
-        return {}
-
-    result = {}
-    latest = rows[0]
-
-    # 股數：用4季中位數減少配股/庫藏股雜訊
-    shares_candidates = []
-    for r in rows[:4]:
-        if r["eps"] and r["eps"] != 0 and r["net_income"]:
-            s = r["net_income"] / r["eps"]
-            if s > 0:
-                shares_candidates.append(s)
-    shares = float(np.median(shares_candidates)) if shares_candidates else None
-
-    eps_parts = []
-    for r in rows[:4]:
-        if r["eps"] is not None:
-            eps_parts.append(r["eps"])
-        elif r["net_income"] is not None and shares and shares > 0:
-            eps_parts.append(r["net_income"] / shares)
-    if eps_parts:
-        result["eps_ttm"] = sum(eps_parts)
-
-    # TTM 淨利（最近4季加總）
-    ni_list = [r["net_income"] for r in rows[:4] if r["net_income"] is not None]
-    if len(ni_list) >= 2:
-        result["ni_ttm"] = sum(ni_list)
-
-    equity_cur  = latest["equity"]
-    equity_prev = rows[1]["equity"] if len(rows) > 1 else None
-    if equity_cur and equity_cur > 0:
-        result["equity"] = equity_cur
-
-    # ROE：TTM淨利 / 平均equity
-    if ni_list and equity_cur and equity_cur > 0:
-        avg_equity = (equity_cur + equity_prev) / 2 if equity_prev and equity_prev > 0 else equity_cur
-        result["roe"] = sum(ni_list) / avg_equity * 100
-
-    if latest["total_assets"] and latest["total_assets"] > 0 and latest["total_debt"] is not None:
-        result["debt_ratio"] = latest["total_debt"] / latest["total_assets"] * 100
-
-    if rows[0]["revenue"]:
-        result["revenue_abs"] = rows[0]["revenue"]
-    if len(rows) >= 5 and rows[0]["revenue"] and rows[4]["revenue"] and rows[4]["revenue"] > 0:
-        result["revenue_yoy"] = (rows[0]["revenue"] - rows[4]["revenue"]) / rows[4]["revenue"] * 100
-
-    # 淨利 YoY（基期需為正且有一定規模，避免從虧損微轉盈造成失真大數）
-    if len(rows) >= 5 and rows[0]["net_income"] and rows[4]["net_income"]:
-        base_ni = rows[0]["net_income"]
-        prev_ni = rows[4]["net_income"]
-        if prev_ni > 0 and prev_ni > abs(base_ni) * 0.05:
-            yoy = (base_ni - prev_ni) / prev_ni * 100
-            if yoy <= 500:
-                result["ni_yoy"] = yoy
-
-    return result
-
-
-def calc_pe_pb(symbol: str, conn, close: float) -> dict:
-    """計算 PE / PB（需要股價）"""
-    rows = conn.execute(
-        "SELECT net_income, eps, equity FROM financials WHERE symbol=? ORDER BY year DESC, quarter DESC LIMIT 4",
-        (symbol,)
-    ).fetchall()
-    if not rows or close <= 0:
-        return {}
-    result = {}
-
-    shares_candidates = []
-    for r in rows:
-        if r["eps"] and r["eps"] != 0 and r["net_income"]:
-            s = r["net_income"] / r["eps"]
-            if s > 0:
-                shares_candidates.append(s)
-    shares = float(np.median(shares_candidates)) if shares_candidates else None
-
-    eps_ttm_parts = []
-    for r in rows:
-        if r["eps"] is not None:
-            eps_ttm_parts.append(r["eps"])
-        elif r["net_income"] is not None and shares and shares > 0:
-            eps_ttm_parts.append(r["net_income"] / shares)
-
-    eps_ttm = sum(eps_ttm_parts) if eps_ttm_parts else None
-    if eps_ttm and eps_ttm > 0:
-        result["pe_ratio"] = close / eps_ttm
-
-    r0 = rows[0]
-    if shares and r0["equity"] and r0["equity"] > 0:
-        bvps = r0["equity"] / shares
-        if bvps > 0:
-            result["pb_ratio"] = close / bvps
     return result
 
 
@@ -346,7 +272,10 @@ def _excess_win(rule: str, fallback: float) -> float:
 
 
 def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = None,
-                market_win_rate: float = 0.5) -> tuple[list[str], str, float]:
+                market_win_rate: float = 0.5,
+                piotroski: dict | None = None, peg_data: dict | None = None,
+                minervini: dict | None = None, rs_pctile: float | None = None,
+                ) -> tuple[list[str], str, float]:
     """
     中長期選股邏輯。
 
@@ -415,6 +344,20 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     if debt_ratio is not None and debt_ratio < 50:
         fund_signals.append(("debt_low", _excess_win("debt_low", 0.02)))
 
+    # Piotroski F-Score（品質因子）
+    if piotroski:
+        f_score = piotroski.get("piotroski", 0)
+        if f_score >= 5:
+            reasons.append(f"Piotroski {f_score}/6")
+            fund_signals.append(("piotroski_high", _excess_win("piotroski_high", 0.06)))
+            has_fundamental = True
+        elif f_score >= 4:
+            reasons.append(f"Piotroski {f_score}/6")
+            fund_signals.append(("piotroski_ok", _excess_win("piotroski_ok", 0.03)))
+        elif f_score <= 1:
+            # 品質極差，直接不推薦
+            return [f"⚠ Piotroski {f_score}/6 品質極差"], "neutral", 0.3
+
     if not has_fundamental:
         return [], "neutral", 0.3
 
@@ -454,6 +397,20 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
             val_mult *= 1.05
         elif pb > 4:
             val_mult *= 0.90
+
+    # PEG Ratio（Peter Lynch）
+    if peg_data:
+        peg = peg_data.get("peg")
+        eps_g = peg_data.get("eps_growth")
+        if peg is not None and eps_g is not None and eps_g >= 10:
+            if peg < 1.0:
+                reasons.append(f"PEG {peg:.1f}（成長價值）")
+                val_mult *= 1.10
+            elif peg < 1.5:
+                reasons.append(f"PEG {peg:.1f}")
+                val_mult *= 1.05
+            elif peg > 2.5:
+                val_mult *= 0.90
 
     # 短期漲幅過大懲罰
     if _r20 is not None:
@@ -546,30 +503,55 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
 
     chip_mult = max(0.80, min(chip_mult, 1.10))
 
-    # == 第五層：技術微調（+/-0.02，被抑制時不加分）==
+    # == 第五層：技術面（Minervini 趨勢 + RS 動量 + RSI）==
     tech_adj = 0.0
     rsi = tech.get("rsi14")
-    sma60 = tech.get("sma60")
     return20d = tech.get("return20d")
 
+    # Minervini 趨勢模板（取代舊的 SMA60 判斷）
+    if minervini:
+        m_score = minervini.get("minervini", 0)
+        if m_score >= 7:
+            reasons.append(f"趨勢強勁 {m_score}/8 (Minervini)")
+            tech_adj += 0.03
+        elif m_score >= 5:
+            reasons.append(f"趨勢健康 {m_score}/8")
+            tech_adj += 0.02
+        elif m_score <= 2:
+            tech_adj -= 0.02
+    else:
+        # fallback: 舊的 SMA60 判斷
+        sma60 = tech.get("sma60")
+        if sma60 and close:
+            if close >= sma60 * 0.95:
+                tech_adj += 0.01
+            else:
+                tech_adj -= 0.02
+
+    # 相對強度 RS percentile（CANSLIM / AQR 動量因子）
+    if rs_pctile is not None:
+        if rs_pctile >= 90:
+            reasons.append(f"相對強度 RS {rs_pctile:.0f}%")
+            tech_adj += 0.03
+        elif rs_pctile >= 80:
+            reasons.append(f"相對強度 RS {rs_pctile:.0f}%")
+            tech_adj += 0.02
+        elif rs_pctile <= 20:
+            tech_adj -= 0.02
+
+    # RSI
     if rsi is not None:
         if rsi < 35 and "rsi_oversold" not in _SUPPRESSED_RULES:
             reasons.append("RSI 低檔")
-            tech_adj += 0.02
-        elif rsi > 75:
-            tech_adj -= 0.02
-
-    if sma60 and close:
-        if close >= sma60 * 0.95:
             tech_adj += 0.01
-        else:
-            tech_adj -= 0.02
+        elif rsi > 75:
+            tech_adj -= 0.01
 
     if return20d is not None and -10 < return20d < 0 and "pullback" not in _SUPPRESSED_RULES:
         reasons.append("近期回調")
         tech_adj += 0.01
 
-    tech_adj = max(-0.04, min(tech_adj, 0.04))
+    tech_adj = max(-0.06, min(tech_adj, 0.06))
 
     # == 最終分數 ==
     score = base_score * val_mult * rev_mult * chip_mult + tech_adj
@@ -641,8 +623,33 @@ def run_rule_engine():
     print(f"市場近期勝率：{market_win_rate:.1%}（{market_env}，動態門檻基準）", flush=True)
 
     symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM stocks").fetchall()]
-    count = 0
 
+    # == Pass 1：計算所有股票的 12-1 月動量，建立 RS 排名 ==
+    from scipy.stats import percentileofscore
+    print("Pass 1：計算相對強度排名...", flush=True)
+    momentum_map = {}
+    for symbol in symbols:
+        price_rows = conn.execute(
+            "SELECT close FROM stock_prices WHERE symbol=? ORDER BY date DESC LIMIT 260",
+            (symbol,)
+        ).fetchall()
+        if len(price_rows) >= 126:
+            closes = [r["close"] for r in reversed(price_rows)]
+            # 12-1 month: skip last 22 days, look back to ~252 days
+            end_idx = max(0, len(closes) - 22)
+            start_idx = 0
+            if end_idx > 0 and closes[start_idx] > 0:
+                momentum_map[symbol] = (closes[end_idx] / closes[start_idx] - 1) * 100
+
+    all_moms = sorted(momentum_map.values()) if momentum_map else []
+    rs_map = {}
+    if all_moms:
+        for sym, mom in momentum_map.items():
+            rs_map[sym] = float(percentileofscore(all_moms, mom, kind='rank'))
+    print(f"  RS 排名完成：{len(rs_map)} 檔", flush=True)
+
+    # == Pass 2：逐股分析 ==
+    count = 0
     for symbol in symbols:
         try:
             rows = conn.execute(
@@ -683,14 +690,29 @@ def run_rule_engine():
                 tech["foreign_net_10d"] = sum(r["foreign_net"] or 0 for r in inst_rows[:10])
                 tech["trust_net_10d"]   = sum(r["trust_net"]   or 0 for r in inst_rows[:10])
 
-            fund = calc_fundamentals(symbol, conn)
-            pe_pb = calc_pe_pb(symbol, conn, close)
-            fund.update(pe_pb)
+            fund = calc_fundamentals(symbol, conn, price=close)
+
+            # 新策略指標
+            pio = calc_piotroski(symbol, conn)
+            peg = calc_peg(fund)
+            mini = calc_minervini(tech, close)
+            rs = rs_map.get(symbol)
 
             monthly = calc_monthly_revenue(symbol, conn)
-            reasons, signal, score = apply_rules(tech, fund, close, monthly, market_win_rate)
+            reasons, signal, score = apply_rules(
+                tech, fund, close, monthly, market_win_rate,
+                piotroski=pio, peg_data=peg, minervini=mini, rs_pctile=rs,
+            )
 
             features = {**tech, **fund, **monthly}
+            if pio:
+                features["piotroski"] = pio.get("piotroski")
+            if peg:
+                features["peg"] = peg.get("peg")
+            if mini:
+                features["minervini"] = mini.get("minervini")
+            if rs is not None:
+                features["rs_pctile"] = round(rs, 1)
 
             conn.execute(
                 """INSERT OR REPLACE INTO recommendations
@@ -699,7 +721,7 @@ def run_rule_engine():
                 (
                     symbol, latest_date, score, signal,
                     json.dumps(features), json.dumps(reasons),
-                    "rule_v5", int(time.time() * 1000)
+                    "rule_v6", int(time.time() * 1000)
                 )
             )
             count += 1

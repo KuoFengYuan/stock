@@ -280,69 +280,9 @@ def _get_chip_features(symbol: str, all_inst: pd.DataFrame, all_margin: pd.DataF
 
 
 def _get_fund_features(symbol: str, conn, price: float | None = None) -> dict:
-    """用於 rule_engine / predict 的即時基本面（取最新已有資料）"""
-    rows = conn.execute(
-        "SELECT revenue, net_income, eps, equity, total_assets, total_debt FROM financials WHERE symbol=? ORDER BY year DESC, quarter DESC LIMIT 8",
-        (symbol,)
-    ).fetchall()
-    result = {}
-    if not rows:
-        return result
-    rows = [dict(r) for r in rows]
-
-    # 股數：用4季中位數
-    shares_candidates = []
-    for r in rows[:4]:
-        if r.get("eps") and r["eps"] != 0 and r.get("net_income"):
-            s = r["net_income"] / r["eps"]
-            if s > 0:
-                shares_candidates.append(s)
-    shares = float(np.median(shares_candidates)) if shares_candidates else None
-
-    # EPS TTM
-    eps_parts = []
-    for r in rows[:4]:
-        if r.get("eps") is not None:
-            eps_parts.append(r["eps"])
-        elif r.get("net_income") is not None and shares and shares > 0:
-            eps_parts.append(r["net_income"] / shares)
-    if eps_parts:
-        result["eps_ttm"] = sum(eps_parts)
-
-    # ROE：TTM淨利 / 平均equity（最新季 + 前一季平均）
-    ni_list = [r["net_income"] for r in rows[:4] if r["net_income"] is not None]
-    equity_cur  = rows[0].get("equity")
-    equity_prev = rows[1].get("equity") if len(rows) > 1 else None
-    if ni_list and equity_cur and equity_cur > 0:
-        avg_equity = (equity_cur + equity_prev) / 2 if equity_prev and equity_prev > 0 else equity_cur
-        result["roe"] = sum(ni_list) / avg_equity * 100
-
-    if rows[0].get("total_assets") and rows[0]["total_assets"] > 0 and rows[0].get("total_debt") is not None:
-        result["debt_ratio"] = rows[0]["total_debt"] / rows[0]["total_assets"] * 100
-
-    if len(rows) >= 5 and rows[0].get("revenue") and rows[4].get("revenue") and rows[4]["revenue"] > 0:
-        result["revenue_yoy"] = (rows[0]["revenue"] - rows[4]["revenue"]) / rows[4]["revenue"] * 100
-
-    if len(rows) >= 5 and rows[0].get("net_income") and rows[4].get("net_income"):
-        base_ni = rows[0]["net_income"]
-        prev_ni = rows[4]["net_income"]
-        if prev_ni > 0 and prev_ni > abs(base_ni) * 0.05:
-            yoy = (base_ni - prev_ni) / prev_ni * 100
-            if yoy <= 500:
-                result["ni_yoy"] = yoy
-
-    # PE / PB（需要股價）
-    if price and price > 0:
-        eps_ttm = result.get("eps_ttm")
-        # 負 EPS 時 PE 設為 NaN
-        if eps_ttm and eps_ttm > 0:
-            result["pe_ratio"] = price / eps_ttm
-        if shares and shares > 0 and equity_cur and equity_cur > 0:
-            bvps = equity_cur / shares
-            if bvps > 0:
-                result["pb_ratio"] = price / bvps
-
-    return result
+    """用於 predict 的即時基本面（委託給 fundamentals.py 單一來源）"""
+    from fundamentals import calc_fundamentals
+    return calc_fundamentals(symbol, conn, price=price)
 
 
 def _load_all_monthly_revenue(conn) -> dict:
