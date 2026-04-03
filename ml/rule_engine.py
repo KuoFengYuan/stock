@@ -303,11 +303,7 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     if _pe_early is not None and _pe_early > 60:
         return [f"⚠ PE {_pe_early:.0f} 過高，估值極度偏貴"], "neutral", 0.3
 
-    # 短期漲太多過濾：20日漲超25% 且 RSI > 70 → 追高風險高，直接 neutral
     _r20 = tech.get("return20d")
-    _rsi_early = tech.get("rsi14")
-    if _r20 is not None and _r20 > 25 and _rsi_early is not None and _rsi_early > 70:
-        return [f"⚠ 短期漲幅 {_r20:.0f}%（20日），RSI {_rsi_early:.0f}，追高風險"], "neutral", 0.3
 
     # ══ 第一層：基本面品質 → 決定 base_score ══
     # base_score 底分改為對齊回測市場基準勝率（熊市自動降低預設底分）
@@ -374,10 +370,10 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     # 短期漲幅過大懲罰（未達前置過濾門檻但仍偏貴）
     if _r20 is not None:
         if _r20 > 20:
-            reasons.append(f"⚠ 近20日漲 {_r20:.0f}%")
+            reasons.append(f"⚠ 追高風險：近20日漲 {_r20:.0f}%")
             val_mult *= 0.82
         elif _r20 > 15:
-            reasons.append(f"近20日漲 {_r20:.0f}%")
+            reasons.append(f"⚠ 追高風險：近20日漲 {_r20:.0f}%")
             val_mult *= 0.90
 
     val_mult = max(0.70, min(val_mult, 1.15))
