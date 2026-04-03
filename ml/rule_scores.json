@@ -1,0 +1,128 @@
+{
+  "generated_at": "2026-04-03T02:08:55.567725",
+  "forward_days": 60,
+  "min_samples": 30,
+  "market_abs_win_rate": 0.3766,
+  "rules": {
+    "rsi_oversold": {
+      "win_rate": 0.5186,
+      "excess_win_rate": 0.4854,
+      "avg_excess_return_pct": 2.8871,
+      "sample_count": 28852,
+      "valid_sample_count": 28852,
+      "score": 0.5186,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "rsi_low": {
+      "win_rate": 0.4193,
+      "excess_win_rate": 0.4668,
+      "avg_excess_return_pct": 1.9675,
+      "sample_count": 74843,
+      "valid_sample_count": 74843,
+      "score": 0.4193,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "rsi_overbought": {
+      "win_rate": 0.4478,
+      "excess_win_rate": 0.4845,
+      "avg_excess_return_pct": 6.3993,
+      "sample_count": 22635,
+      "valid_sample_count": 22635,
+      "score": 0.4478,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "macd_golden_cross": {
+      "win_rate": 0.3846,
+      "excess_win_rate": 0.4635,
+      "avg_excess_return_pct": 2.5175,
+      "sample_count": 14700,
+      "valid_sample_count": 14700,
+      "score": 0.3846,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "bb_lower": {
+      "win_rate": 0.3972,
+      "excess_win_rate": 0.4862,
+      "avg_excess_return_pct": 1.8892,
+      "sample_count": 98059,
+      "valid_sample_count": 98059,
+      "score": 0.3972,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "vol_surge": {
+      "win_rate": 0.3883,
+      "excess_win_rate": 0.4538,
+      "avg_excess_return_pct": 2.9449,
+      "sample_count": 64021,
+      "valid_sample_count": 64021,
+      "score": 0.3883,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "pullback": {
+      "win_rate": 0.3787,
+      "excess_win_rate": 0.4647,
+      "avg_excess_return_pct": 1.8549,
+      "sample_count": 164040,
+      "valid_sample_count": 164040,
+      "score": 0.3787,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "roe_high": {
+      "win_rate": 0.4833,
+      "excess_win_rate": 0.4833,
+      "avg_excess_return_pct": 6.2444,
+      "sample_count": 269,
+      "valid_sample_count": 269,
+      "score": 0.4833,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "roe_ok": {
+      "win_rate": 0.4734,
+      "excess_win_rate": 0.4808,
+      "avg_excess_return_pct": 3.5706,
+      "sample_count": 676,
+      "valid_sample_count": 676,
+      "score": 0.4734,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "revenue_yoy": {
+      "win_rate": 0.48,
+      "excess_win_rate": 0.5219,
+      "avg_excess_return_pct": 6.383,
+      "sample_count": 4290,
+      "valid_sample_count": 4290,
+      "score": 0.48,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "ni_yoy": {
+      "win_rate": 0.4781,
+      "excess_win_rate": 0.526,
+      "avg_excess_return_pct": 5.5768,
+      "sample_count": 3386,
+      "valid_sample_count": 3386,
+      "score": 0.4781,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    },
+    "debt_low": {
+      "win_rate": 0.4236,
+      "excess_win_rate": 0.4653,
+      "avg_excess_return_pct": 3.2866,
+      "sample_count": 10072,
+      "valid_sample_count": 10072,
+      "score": 0.4236,
+      "status": "ok",
+      "market_abs_win_rate": 0.3766
+    }
+  }
+}

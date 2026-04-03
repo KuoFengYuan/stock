@@ -1,65 +1,273 @@
-import Image from "next/image";
+'use client'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import type { RecommendationItem } from '@/types/stock'
 
-export default function Home() {
+function useTimer(running: boolean) {
+  const [elapsed, setElapsed] = useState(0)
+  const startRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (running) {
+      startRef.current = Date.now()
+      setElapsed(0)
+      const id = setInterval(() => {
+        setElapsed(Math.floor((Date.now() - startRef.current!) / 1000))
+      }, 1000)
+      return () => clearInterval(id)
+    } else {
+      startRef.current = null
+    }
+  }, [running])
+
+  return elapsed
+}
+
+function formatElapsed(sec: number) {
+  if (sec < 60) return `${sec} 秒`
+  return `${Math.floor(sec / 60)} 分 ${sec % 60} 秒`
+}
+
+export default function HomePage() {
+  const [data, setData] = useState<{ date: string | null; total: number; items: RecommendationItem[] } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+  const [analyzing, setAnalyzing] = useState(false)
+  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null)
+  const [lastAnalyzeTime, setLastAnalyzeTime] = useState<string | null>(null)
+  const [log, setLog] = useState('')
+
+  const syncElapsed = useTimer(syncing)
+  const analyzeElapsed = useTimer(analyzing)
+
+  const fetchRecommendations = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/recommendations')
+      const json = await res.json()
+      setData(json)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchRecommendations() }, [fetchRecommendations])
+
+  async function handleSync() {
+    setSyncing(true)
+    setLog('')
+    const start = Date.now()
+    try {
+      const res = await fetch('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'all' }) })
+      const json = await res.json()
+      setLog(json.output || json.error || '完成')
+      const took = Math.floor((Date.now() - start) / 1000)
+      setLastSyncTime(`${new Date().toLocaleTimeString('zh-TW')}（耗時 ${formatElapsed(took)}）`)
+      await fetchRecommendations()
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  async function handleAnalyze(mode: 'rule' | 'ml') {
+    setAnalyzing(true)
+    setLog('')
+    const start = Date.now()
+    try {
+      const res = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) })
+      const json = await res.json()
+      setLog(json.output || json.error || '完成')
+      const took = Math.floor((Date.now() - start) / 1000)
+      setLastAnalyzeTime(`${new Date().toLocaleTimeString('zh-TW')}（耗時 ${formatElapsed(took)}）`)
+      await fetchRecommendations()
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div>
+      <div className="flex items-start justify-between mb-6 gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-white">今日推薦清單</h1>
+          {data?.date && <p className="text-slate-400 text-sm mt-1">資料日期：{data.date}　共 {data.total} 檔</p>}
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex gap-2">
+            <button
+              onClick={handleSync}
+              disabled={syncing || analyzing}
+              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-lg transition-colors min-w-28"
+            >
+              {syncing ? `同步中… ${formatElapsed(syncElapsed)}` : '同步資料'}
+            </button>
+            <button
+              onClick={() => handleAnalyze('rule')}
+              disabled={syncing || analyzing}
+              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-lg transition-colors min-w-28"
+            >
+              {analyzing ? `分析中… ${formatElapsed(analyzeElapsed)}` : '規則分析'}
+            </button>
+            <button
+              onClick={() => handleAnalyze('ml')}
+              disabled={syncing || analyzing}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded-lg transition-colors min-w-28"
+            >
+              {analyzing ? `分析中… ${formatElapsed(analyzeElapsed)}` : 'AI 分析'}
+            </button>
+          </div>
+          <div className="text-xs text-slate-500 text-right space-y-0.5">
+            {lastSyncTime && <div>最後同步：{lastSyncTime}</div>}
+            {lastAnalyzeTime && <div>最後分析：{lastAnalyzeTime}</div>}
+          </div>
         </div>
-      </main>
+      </div>
+
+      {log && (
+        <pre className="mb-4 p-3 bg-slate-800 text-slate-300 text-xs rounded-lg overflow-auto max-h-40 whitespace-pre-wrap">
+          {log.split('\n').filter(l => !/[^\x00-\x7F\u4e00-\u9fff\u3400-\u4dbf\u2000-\u206f\uff00-\uffef\s]/.test(l) || l.trim() === '').join('\n')}
+        </pre>
+      )}
+
+      {loading ? (
+        <div className="text-slate-400 text-center py-20">載入中...</div>
+      ) : !data?.items.length ? (
+        <div className="text-slate-400 text-center py-20">
+          <p className="mb-2">尚無推薦資料</p>
+          <p className="text-sm">請先點擊「同步資料」取得台股資料，再執行分析</p>
+        </div>
+      ) : (
+        <RecommendationTable items={data.items} />
+      )}
     </div>
-  );
+  )
+}
+
+function RecommendationTable({ items }: { items: RecommendationItem[] }) {
+  const [signalFilter, setSignalFilter] = useState<'all' | 'buy' | 'watch' | 'neutral'>('all')
+
+  const filtered = signalFilter === 'all' ? items : items.filter(i => i.signal === signalFilter)
+
+  const counts = {
+    all: items.length,
+    buy: items.filter(i => i.signal === 'buy').length,
+    watch: items.filter(i => i.signal === 'watch').length,
+    neutral: items.filter(i => i.signal === 'neutral').length,
+  }
+
+  const filterBtns: { key: typeof signalFilter; label: string; cls: string }[] = [
+    { key: 'all',     label: `全部 ${counts.all}`,       cls: 'bg-slate-600 text-slate-200' },
+    { key: 'buy',     label: `買入 ${counts.buy}`,       cls: 'bg-green-900/60 text-green-300 border border-green-700' },
+    { key: 'watch',   label: `觀察 ${counts.watch}`,     cls: 'bg-yellow-900/60 text-yellow-300 border border-yellow-700' },
+    { key: 'neutral', label: `中立 ${counts.neutral}`,   cls: 'bg-slate-700 text-slate-400' },
+  ]
+
+  return (
+    <div>
+      <div className="flex gap-2 mb-4">
+        {filterBtns.map(btn => (
+          <button
+            key={btn.key}
+            onClick={() => setSignalFilter(btn.key)}
+            className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+              signalFilter === btn.key
+                ? btn.cls + ' ring-2 ring-white/20'
+                : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+            }`}
+          >
+            {btn.label}
+          </button>
+        ))}
+      </div>
+      <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-slate-400 border-b border-slate-700">
+            <th className="text-left py-3 px-3">股票</th>
+            <th className="text-left py-3 px-3">市場</th>
+            <th className="text-right py-3 px-3">收盤價</th>
+            <th className="text-right py-3 px-3">漲跌幅</th>
+            <th className="text-right py-3 px-3">成交量</th>
+            <th className="text-right py-3 px-3">評分</th>
+            <th className="text-left py-3 px-3">訊號</th>
+            <th className="text-left py-3 px-3">推薦理由</th>
+          </tr>
+        </thead>
+        <tbody>
+          {filtered.map((item) => (
+            <tr key={item.symbol} className="border-b border-slate-800 hover:bg-slate-800/50 transition-colors">
+              <td className="py-3 px-3 whitespace-nowrap">
+                <a href={`/stocks/${item.symbol}`} className="text-blue-400 hover:text-blue-300 font-medium">
+                  {item.symbol.replace('.TW', '').replace('.TWO', '')}
+                </a>
+                <span className="text-slate-400 ml-2 text-xs">{item.name}</span>
+              </td>
+              <td className="py-3 px-3 whitespace-nowrap">
+                <span className={`text-xs px-2 py-0.5 rounded ${item.market === 'TSE' ? 'bg-blue-900/50 text-blue-300' : 'bg-purple-900/50 text-purple-300'}`}>
+                  {item.market === 'TSE' ? '上市' : '上櫃'}
+                </span>
+              </td>
+              <td className="py-3 px-3 text-right font-mono whitespace-nowrap">{item.close?.toFixed(2) ?? '-'}</td>
+              <td className={`py-3 px-3 text-right font-mono whitespace-nowrap ${item.changePct == null ? 'text-slate-500' : item.changePct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {item.changePct != null ? `${item.changePct >= 0 ? '+' : ''}${item.changePct.toFixed(2)}%` : '-'}
+              </td>
+              <td className="py-3 px-3 text-right font-mono whitespace-nowrap text-slate-300">
+                {item.volume ? item.volume.toLocaleString() + '張' : '-'}
+              </td>
+              <td className="py-3 px-3 text-right whitespace-nowrap">
+                <ScoreBar score={item.score} />
+              </td>
+              <td className="py-3 px-3 whitespace-nowrap">
+                <SignalBadge signal={item.signal} />
+              </td>
+              <td className="py-3 px-3 min-w-[320px]">
+                <div className="flex flex-wrap gap-1.5">
+                  {item.reasons.map((r, i) => {
+                    const isWarn = r.startsWith('⚠')
+                    const isDiverg = r.includes('買超／') || r.includes('賣超／')
+                    return (
+                      <span key={i} className={`text-xs px-2 py-0.5 rounded whitespace-nowrap ${
+                        isWarn
+                          ? 'bg-red-900/50 text-red-300 border border-red-800/60'
+                          : isDiverg
+                          ? 'bg-yellow-900/40 text-yellow-300 border border-yellow-700/50'
+                          : 'bg-slate-700/80 text-slate-300'
+                      }`}>{r}</span>
+                    )
+                  })}
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  )
+}
+
+function ScoreBar({ score }: { score: number }) {
+  const pct = Math.round(score * 100)
+  const color = pct >= 70 ? 'bg-green-500' : pct >= 50 ? 'bg-yellow-500' : 'bg-slate-500'
+  return (
+    <div className="flex items-center gap-2 justify-end">
+      <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+        <div className={`h-full ${color} rounded-full`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-xs text-slate-300 w-8 text-right">{pct}</span>
+    </div>
+  )
+}
+
+function SignalBadge({ signal }: { signal: string }) {
+  const map: Record<string, string> = {
+    buy: 'bg-green-900/60 text-green-300 border border-green-700',
+    watch: 'bg-yellow-900/60 text-yellow-300 border border-yellow-700',
+    neutral: 'bg-slate-700 text-slate-400',
+  }
+  const label: Record<string, string> = { buy: '買入', watch: '觀察', neutral: '中立' }
+  return (
+    <span className={`text-xs px-2 py-0.5 rounded ${map[signal] ?? map.neutral}`}>
+      {label[signal] ?? signal}
+    </span>
+  )
 }
