@@ -146,6 +146,17 @@ def calc_indicators(df: pd.DataFrame) -> dict:
     elif len(close) >= 126:
         result["momentum_12_1"] = float((close.iloc[-22] / close.iloc[0] - 1) * 100)
 
+    # 量價背離偵測（近20日）
+    if len(close) >= 21 and len(vol) >= 21:
+        price_up = close.iloc[-1] > close.iloc[-21]
+        vol_down = vol.iloc[-5:].mean() < vol.iloc[-21:-5].mean() * 0.7
+        price_down = close.iloc[-1] < close.iloc[-21]
+        vol_up = vol.iloc[-5:].mean() > vol.iloc[-21:-5].mean() * 1.5
+        if price_up and vol_down:
+            result["vol_price_divergence"] = "bearish"  # 價漲量縮
+        elif price_down and vol_up:
+            result["vol_price_divergence"] = "bullish"  # 價跌量增（可能是洗盤）
+
     result["close"] = float(close.iloc[-1])
     result["volume"] = int(df["volume"].iloc[-1])
 
@@ -275,6 +286,7 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
                 market_win_rate: float = 0.5,
                 piotroski: dict | None = None, peg_data: dict | None = None,
                 minervini: dict | None = None, rs_pctile: float | None = None,
+                industry_median_pe: float | None = None,
                 ) -> tuple[list[str], str, float]:
     """
     中長期選股邏輯。
@@ -412,6 +424,26 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
             elif peg > 2.5:
                 val_mult *= 0.90
 
+    # 殖利率（高殖利率 = 台股核心價值因子）
+    div_yield = fund.get("div_yield")
+    if div_yield is not None:
+        if div_yield >= 6:
+            reasons.append(f"高殖利率 {div_yield:.1f}%")
+            val_mult *= 1.08
+        elif div_yield >= 4:
+            reasons.append(f"殖利率 {div_yield:.1f}%")
+            val_mult *= 1.04
+
+    # 產業相對估值（同產業 PE 中位數比較）
+    if pe is not None and industry_median_pe is not None and industry_median_pe > 0:
+        pe_relative = pe / industry_median_pe
+        if pe_relative < 0.7:
+            reasons.append(f"產業低估 PE={pe:.0f} (同業中位 {industry_median_pe:.0f})")
+            val_mult *= 1.06
+        elif pe_relative > 1.5:
+            reasons.append(f"⚠ 產業高估 PE={pe:.0f} (同業中位 {industry_median_pe:.0f})")
+            val_mult *= 0.92
+
     # 短期漲幅過大懲罰
     if _r20 is not None:
         if _r20 > 20:
@@ -501,7 +533,37 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
         reasons.append(f"⚠ 法人近10日同步賣超（外資 -{_chip_str(foreign_10d)} 投信 -{_chip_str(trust_10d)}）")
         chip_mult *= 0.82
 
-    chip_mult = max(0.80, min(chip_mult, 1.10))
+    # 自營商反指標（自營商大買常是偏空信號）
+    dealer_10d = tech.get("dealer_net_10d")
+    if dealer_10d is not None and abs(dealer_10d) > CHIP_MIN_ABS:
+        if dealer_10d > CHIP_MIN_ABS * 5:
+            reasons.append(f"⚠ 自營商大買 +{_chip_str(dealer_10d)}（近10日，反指標）")
+            chip_mult *= 0.95
+        elif dealer_10d < -CHIP_MIN_ABS * 5:
+            # 自營商大賣反而可能是正面（散戶指標相反）
+            chip_mult *= 1.02
+
+    # 融資增減（散戶指標）
+    margin_chg = tech.get("margin_balance_chg_10d")
+    short_balance = tech.get("short_balance")
+    if margin_chg is not None:
+        if margin_chg > 15:
+            reasons.append(f"⚠ 融資大增 +{margin_chg:.0f}%（散戶追高）")
+            chip_mult *= 0.93
+        elif margin_chg < -15:
+            reasons.append(f"融資大減 {margin_chg:.0f}%（籌碼沉澱）")
+            chip_mult *= 1.03
+
+    # 融券回補壓力
+    if short_balance is not None and short_balance > 0:
+        vol = tech.get("volume", 0)
+        if vol > 0:
+            short_ratio = short_balance / vol  # 融券/日均量
+            if short_ratio > 5:
+                reasons.append(f"融券/量比 {short_ratio:.1f} 天（軋空壓力）")
+                chip_mult *= 1.03
+
+    chip_mult = max(0.75, min(chip_mult, 1.15))
 
     # == 第五層：技術面（Minervini 趨勢 + RS 動量 + RSI）==
     tech_adj = 0.0
@@ -549,6 +611,15 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
 
     if return20d is not None and -10 < return20d < 0 and "pullback" not in _SUPPRESSED_RULES:
         reasons.append("近期回調")
+        tech_adj += 0.01
+
+    # 量價背離
+    vpd = tech.get("vol_price_divergence")
+    if vpd == "bearish":
+        reasons.append("⚠ 價漲量縮（量價背離）")
+        tech_adj -= 0.02
+    elif vpd == "bullish":
+        reasons.append("價跌量增（可能洗盤）")
         tech_adj += 0.01
 
     tech_adj = max(-0.06, min(tech_adj, 0.06))
@@ -648,6 +719,40 @@ def run_rule_engine():
             rs_map[sym] = float(percentileofscore(all_moms, mom, kind='rank'))
     print(f"  RS 排名完成：{len(rs_map)} 檔", flush=True)
 
+    # == Pass 1b：建立產業 PE 中位數（用 stock_tags 的 sub_tag 分群）==
+    print("Pass 1b：計算產業 PE 中位數...", flush=True)
+    industry_pe_map: dict[str, float] = {}  # symbol -> industry median PE
+    # 用 stock_tags 的第一個 sub_tag 做產業分群
+    tag_rows = conn.execute("SELECT symbol, sub_tag FROM stock_tags").fetchall()
+    symbol_industry: dict[str, str] = {}
+    for tr in tag_rows:
+        if tr["symbol"] not in symbol_industry:
+            symbol_industry[tr["symbol"]] = tr["sub_tag"]
+    # 收集每個產業的 PE
+    from collections import defaultdict
+    industry_pes: dict[str, list] = defaultdict(list)
+    for sym in symbols:
+        ind = symbol_industry.get(sym)
+        if not ind:
+            continue
+        pe_row = conn.execute(
+            """SELECT r.features_json FROM recommendations r
+               WHERE r.symbol=? ORDER BY r.date DESC LIMIT 1""",
+            (sym,)
+        ).fetchone()
+        if pe_row and pe_row["features_json"]:
+            feats = json.loads(pe_row["features_json"])
+            pe_val = feats.get("pe_ratio")
+            if pe_val and 0 < pe_val < 200:
+                industry_pes[ind].append(pe_val)
+    for ind, pes in industry_pes.items():
+        if len(pes) >= 3:
+            med = float(np.median(pes))
+            for sym, s_ind in symbol_industry.items():
+                if s_ind == ind:
+                    industry_pe_map[sym] = med
+    print(f"  產業 PE 中位數：{len(industry_pes)} 個產業，{len(industry_pe_map)} 檔覆蓋", flush=True)
+
     # == Pass 2：逐股分析 ==
     count = 0
     for symbol in symbols:
@@ -681,7 +786,7 @@ def run_rule_engine():
             tech["high_1y"] = _calc_high_1y(df)
 
             inst_rows = conn.execute(
-                "SELECT foreign_net, trust_net FROM institutional WHERE symbol=? ORDER BY date DESC LIMIT 60",
+                "SELECT foreign_net, trust_net, dealer_net FROM institutional WHERE symbol=? ORDER BY date DESC LIMIT 60",
                 (symbol,)
             ).fetchall()
             if inst_rows:
@@ -689,6 +794,19 @@ def run_rule_engine():
                 tech["trust_net_60d"]   = sum(r["trust_net"]   or 0 for r in inst_rows)
                 tech["foreign_net_10d"] = sum(r["foreign_net"] or 0 for r in inst_rows[:10])
                 tech["trust_net_10d"]   = sum(r["trust_net"]   or 0 for r in inst_rows[:10])
+                tech["dealer_net_10d"]  = sum(r["dealer_net"]  or 0 for r in inst_rows[:10])
+
+            # 融資融券
+            margin_rows = conn.execute(
+                "SELECT margin_balance, short_balance FROM margin_trading WHERE symbol=? ORDER BY date DESC LIMIT 15",
+                (symbol,)
+            ).fetchall()
+            if margin_rows and len(margin_rows) >= 11:
+                mb_now = margin_rows[0]["margin_balance"] or 0
+                mb_10  = margin_rows[10]["margin_balance"] or 0
+                if mb_10 > 0:
+                    tech["margin_balance_chg_10d"] = (mb_now - mb_10) / mb_10 * 100
+                tech["short_balance"] = margin_rows[0]["short_balance"] or 0
 
             fund = calc_fundamentals(symbol, conn, price=close)
 
@@ -699,9 +817,11 @@ def run_rule_engine():
             rs = rs_map.get(symbol)
 
             monthly = calc_monthly_revenue(symbol, conn)
+            ind_pe = industry_pe_map.get(symbol)
             reasons, signal, score = apply_rules(
                 tech, fund, close, monthly, market_win_rate,
                 piotroski=pio, peg_data=peg, minervini=mini, rs_pctile=rs,
+                industry_median_pe=ind_pe,
             )
 
             features = {**tech, **fund, **monthly}

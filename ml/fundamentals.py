@@ -98,11 +98,14 @@ def calc_fundamentals(symbol: str, conn, price: float | None = None) -> dict:
             if yoy <= 500:
                 result["ni_yoy"] = yoy
 
-    # PE / PB（需要股價）
+    # PE / PB / 殖利率（需要股價）
     if price and price > 0:
         eps_ttm = result.get("eps_ttm")
         if eps_ttm and eps_ttm > 0:
             result["pe_ratio"] = price / eps_ttm
+            # 估算殖利率：台股平均配息率 ~70%
+            est_dividend = eps_ttm * 0.7
+            result["div_yield"] = est_dividend / price * 100
         if shares and shares > 0 and equity_cur and equity_cur > 0:
             bvps = equity_cur / shares
             if bvps > 0:

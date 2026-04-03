@@ -854,6 +854,74 @@ def sync_monthly_revenue(conn):
     return total
 
 
+def sync_otc_prices_yf(conn):
+    """用 yfinance 補齊上櫃 (OTC) 股票缺失的價格資料"""
+    import yfinance as yf
+
+    otc_missing = conn.execute("""
+        SELECT s.symbol FROM stocks s
+        WHERE s.market = 'OTC'
+        AND NOT EXISTS (SELECT 1 FROM stock_prices p WHERE p.symbol = s.symbol)
+    """).fetchall()
+
+    if not otc_missing:
+        print("上櫃價格已完整，無需補齊", flush=True)
+        return 0
+
+    symbols = [r[0] for r in otc_missing]
+    print(f"用 yfinance 補齊 {len(symbols)} 檔上櫃股票價格（近2年）...", flush=True)
+    total = 0
+
+    # 分批下載（yfinance 支援多檔同時下載）
+    BATCH = 50
+    for i in range(0, len(symbols), BATCH):
+        batch = symbols[i:i+BATCH]
+        tickers = " ".join(batch)
+        try:
+            df = yf.download(tickers, period="2y", group_by="ticker", progress=False, threads=True)
+        except Exception as e:
+            print(f"  [WARN] batch {i//BATCH+1}: {e}", flush=True)
+            continue
+
+        for sym in batch:
+            try:
+                if len(batch) == 1:
+                    stock_df = df
+                else:
+                    stock_df = df[sym] if sym in df.columns.get_level_values(0) else None
+                if stock_df is None or stock_df.empty:
+                    continue
+                stock_df = stock_df.dropna(subset=["Close"])
+                count = 0
+                for d, row in stock_df.iterrows():
+                    dt = d[0] if isinstance(d, tuple) else d
+                    try:
+                        o = float(row.get("Open", 0) or 0)
+                        h = float(row.get("High", 0) or 0)
+                        l = float(row.get("Low", 0) or 0)
+                        c = float(row.get("Close", 0) or 0)
+                        v = int(row.get("Volume", 0) or 0) // 1000  # 股 -> 張
+                        if c <= 0:
+                            continue
+                        conn.execute(
+                            "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
+                            (sym, dt.strftime("%Y-%m-%d"), o, h, l, c, v, c)
+                        )
+                        count += 1
+                    except Exception:
+                        pass
+                total += count
+            except Exception:
+                pass
+
+        conn.commit()
+        pct = min(100, (i + BATCH) * 100 // len(symbols))
+        print(f"  進度 {min(i+BATCH, len(symbols))}/{len(symbols)} ({pct}%)，累計 {total} 筆", flush=True)
+
+    print(f"上櫃價格補齊完成，共 {total} 筆", flush=True)
+    return total
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     conn = get_conn()
@@ -863,6 +931,7 @@ if __name__ == "__main__":
 
     if mode in ("prices", "all"):
         sync_prices(conn)
+        sync_otc_prices_yf(conn)  # 補齊 TPEX 被 WAF 擋的上櫃股票
 
     if mode in ("financials", "all"):
         sync_financials(conn)
