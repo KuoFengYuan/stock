@@ -40,13 +40,25 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
   const chartsRef = useRef<IChartApi[]>([])
   const maSeriesRef = useRef<Record<number, ISeriesApi<'Line'>>>({})
 
+  // Crosshair tooltip state (K 棒 OHLC)
+  const [priceTooltip, setPriceTooltip] = useState<{
+    x: number; date: string; open: number; high: number; low: number; close: number; volume: number; up: boolean
+  } | null>(null)
+
   // Tooltip state
   const [instTooltip, setInstTooltip] = useState<{
     x: number; y: number; date: string; foreign: number; trust: number
   } | null>(null)
 
+  // Build a date → price map for crosshair tooltip
+  const priceMapRef = useRef<Map<string, PriceRow>>(new Map())
+
   // Build a date → inst map for quick lookup
   const instMapRef = useRef<Map<string, InstRow>>(new Map())
+
+  useEffect(() => {
+    priceMapRef.current = new Map(prices.map(p => [p.date, p]))
+  }, [prices])
 
   useEffect(() => {
     instMapRef.current = new Map(institutional.map(d => [d.date, d]))
@@ -71,6 +83,17 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       wickUpColor: '#ef4444', wickDownColor: '#22c55e',
     })
     candleSeries.setData(prices.map(p => ({ time: p.date, open: p.open, high: p.high, low: p.low, close: p.close })))
+
+    // Crosshair → OHLC tooltip
+    priceChart.subscribeCrosshairMove(param => {
+      if (!param.time || !param.sourceEvent) { setPriceTooltip(null); return }
+      const date = param.time as string
+      const row = priceMapRef.current.get(date)
+      if (!row) { setPriceTooltip(null); return }
+      const rect = priceRef.current!.getBoundingClientRect()
+      const x = (param.sourceEvent as unknown as MouseEvent).clientX - rect.left
+      setPriceTooltip({ x, date, open: row.open, high: row.high, low: row.low, close: row.close, volume: row.volume, up: row.close >= row.open })
+    })
 
     const maRefs: Record<number, ISeriesApi<'Line'>> = {}
     for (const period of [5, 10, 20, 60]) {
@@ -188,7 +211,28 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
   return (
     <div>
-      <div ref={priceRef} className="w-full" />
+      <div className="relative">
+        <div ref={priceRef} className="w-full" />
+        {priceTooltip && (
+          <div
+            className="absolute top-2 pointer-events-none px-2.5 py-1.5 rounded text-xs whitespace-nowrap z-10"
+            style={{
+              left: Math.min(priceTooltip.x + 14, (priceRef.current?.clientWidth ?? 600) - 200),
+              background: '#0f172a',
+              border: '1px solid #475569',
+            }}
+          >
+            <div className="text-slate-400 mb-1">{priceTooltip.date}</div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-0.5" style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>
+              <span className="text-slate-500">開</span><span>{priceTooltip.open.toFixed(2)}</span>
+              <span className="text-slate-500">高</span><span>{priceTooltip.high.toFixed(2)}</span>
+              <span className="text-slate-500">低</span><span>{priceTooltip.low.toFixed(2)}</span>
+              <span className="text-slate-500">收</span><span>{priceTooltip.close.toFixed(2)}</span>
+            </div>
+            <div className="mt-1 text-slate-400">量 {priceTooltip.volume.toLocaleString()} 張</div>
+          </div>
+        )}
+      </div>
       <div className="mt-1 px-1 text-xs text-slate-500">成交量（張）</div>
       <div ref={volRef} className="w-full" />
 
