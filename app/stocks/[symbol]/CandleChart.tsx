@@ -42,7 +42,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
   // Crosshair tooltip state (K 棒 OHLC)
   const [priceTooltip, setPriceTooltip] = useState<{
-    x: number; date: string; open: number; high: number; low: number; close: number; volume: number; up: boolean
+    x: number; date: string; open: number; high: number; low: number; close: number; volume: number; up: boolean; changePct: number | null
   } | null>(null)
 
   // Tooltip state
@@ -52,12 +52,14 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
   // Build a date → price map for crosshair tooltip
   const priceMapRef = useRef<Map<string, PriceRow>>(new Map())
+  const priceIdxMapRef = useRef<Map<string, number>>(new Map())
 
   // Build a date → inst map for quick lookup
   const instMapRef = useRef<Map<string, InstRow>>(new Map())
 
   useEffect(() => {
     priceMapRef.current = new Map(prices.map(p => [p.date, p]))
+    priceIdxMapRef.current = new Map(prices.map((p, i) => [p.date, i]))
   }, [prices])
 
   useEffect(() => {
@@ -92,7 +94,10 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       if (!row) { setPriceTooltip(null); return }
       const rect = priceRef.current!.getBoundingClientRect()
       const x = (param.sourceEvent as unknown as MouseEvent).clientX - rect.left
-      setPriceTooltip({ x, date, open: row.open, high: row.high, low: row.low, close: row.close, volume: row.volume, up: row.close >= row.open })
+      const idx = priceIdxMapRef.current.get(date) ?? -1
+      const prevClose = idx > 0 ? prices[idx - 1].close : null
+      const changePct = prevClose ? (row.close - prevClose) / prevClose * 100 : null
+      setPriceTooltip({ x, date, open: row.open, high: row.high, low: row.low, close: row.close, volume: row.volume, up: row.close >= row.open, changePct })
     })
 
     const maRefs: Record<number, ISeriesApi<'Line'>> = {}
@@ -223,6 +228,11 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
             <span className="text-slate-500">高</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.high.toFixed(2)}</span>
             <span className="text-slate-500">低</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.low.toFixed(2)}</span>
             <span className="text-slate-500">收</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.close.toFixed(2)}</span>
+            {priceTooltip.changePct != null && (
+              <span style={{ color: priceTooltip.changePct >= 0 ? '#ef4444' : '#22c55e' }}>
+                {priceTooltip.changePct >= 0 ? '+' : ''}{priceTooltip.changePct.toFixed(2)}%
+              </span>
+            )}
             <span className="text-slate-500">量</span><span className="text-slate-400">{priceTooltip.volume.toLocaleString()}</span>
           </div>
         )}
