@@ -211,6 +211,60 @@ def _build_tech_triggers(panel: dict, all_financials: dict, forward_days: int,
             if rev_accel_s is not None:
                 _append_triggers(triggers, "rev_accel", symbol, rev_accel_s > 0, fwd_ret)
 
+        # == Piotroski F-Score 時序 ==
+        # 用 fund_ts 裡的 ROA、debt_ratio、revenue_yoy 等建構簡化版 F-Score
+        roa_s = fund_ts.get("roe")  # 用 ROE 近似 ROA（都反映獲利能力）
+        debt_s = fund_ts.get("debt_ratio")
+        rev_s = fund_ts.get("revenue_yoy")
+        if roa_s is not None and debt_s is not None:
+            # 簡化 Piotroski：ROA>0 + ROA改善 + 負債降 + 營收成長 + 營益率改善
+            roa_pos = (roa_s > 0).astype(int)
+            roa_up = (roa_s > roa_s.shift(90)).astype(int)  # ~1季前
+            debt_down = (debt_s < debt_s.shift(90)).astype(int)
+            rev_pos = ((rev_s > 0) if rev_s is not None else pd.Series(0, index=roa_s.index)).astype(int)
+            pio_score = roa_pos + roa_up + debt_down + rev_pos
+            _append_triggers(triggers, "piotroski_high", symbol, pio_score >= 4, fwd_ret)
+            _append_triggers(triggers, "piotroski_ok", symbol, (pio_score >= 3) & (pio_score < 4), fwd_ret)
+
+        # == Minervini 趨勢模板 ==
+        if len(close) >= 200:
+            sma50  = ta.sma(close, length=50)
+            sma150 = ta.sma(close, length=150)
+            sma200 = ta.sma(close, length=200)
+            if sma50 is not None and sma150 is not None and sma200 is not None:
+                m1 = (close > sma150).astype(int)
+                m2 = (close > sma200).astype(int)
+                m3 = (sma150 > sma200).astype(int)
+                m4 = (sma200 > sma200.shift(22)).astype(int)
+                m5 = (sma50 > sma150).astype(int)
+                m6 = (close > sma50).astype(int)
+                # 52w high/low
+                high_252 = close.rolling(252, min_periods=60).max()
+                low_252  = close.rolling(252, min_periods=60).min()
+                m7 = (close >= low_252 * 1.25).astype(int)
+                m8 = (close >= high_252 * 0.75).astype(int)
+                mini_score = m1 + m2 + m3 + m4 + m5 + m6 + m7 + m8
+                _append_triggers(triggers, "minervini_strong", symbol, mini_score >= 7, fwd_ret)
+                _append_triggers(triggers, "minervini_ok", symbol, (mini_score >= 5) & (mini_score < 7), fwd_ret)
+
+        # == RS 相對強度（12-1 月動量 > 0）==
+        if len(close) >= 252:
+            mom_12_1 = close.shift(22) / close.shift(252) - 1
+            # RS > 0 表示過去一年跑贏起點（簡化版，完整版需 cross-sectional 排名）
+            _append_triggers(triggers, "rs_high", symbol, mom_12_1 > 0.3, fwd_ret)
+
+        # == PEG ==
+        eps_ttm_s = fund_ts.get("eps_ttm")
+        pe_s = None
+        if eps_ttm_s is not None:
+            pe_s = close / eps_ttm_s.replace(0, np.nan)
+            pe_s = pe_s.where(eps_ttm_s > 0)
+            # EPS 成長率（TTM vs 1年前 TTM）
+            eps_growth = (eps_ttm_s / eps_ttm_s.shift(252).replace(0, np.nan) - 1) * 100
+            peg_s = pe_s / eps_growth.replace(0, np.nan)
+            peg_valid = (eps_growth > 5) & (pe_s > 0) & (peg_s > 0)
+            _append_triggers(triggers, "peg_value", symbol, peg_valid & (peg_s < 1.0), fwd_ret)
+
     return triggers
 
 
@@ -233,7 +287,8 @@ def _dedup_fundamental_triggers(trigger_list: list) -> list:
 def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int, forward_days: int,
                     market_abs_win_rate: float = 0.45) -> dict:
     FUND_RULES = {"roe_high", "roe_ok", "revenue_yoy", "ni_yoy", "debt_low",
-                   "rev_yoy_6m", "rev_yoy_3m", "rev_mom_3m", "rev_accel"}
+                   "rev_yoy_6m", "rev_yoy_3m", "rev_mom_3m", "rev_accel",
+                   "piotroski_high", "piotroski_ok", "peg_value"}
     results = {}
 
     for rule, tlist in triggers.items():
