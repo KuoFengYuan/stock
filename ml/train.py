@@ -108,13 +108,12 @@ def train():
         combined = combined[combined["date"] < cutoff]
 
     # ── 相對強勢標籤：同一天所有股票 forward_ret 排名前 30% 為正例 ──
-    def _relative_label(group):
-        threshold = group["forward_ret"].quantile(1 - RELATIVE_TOP_PCT)
-        group["label"] = (group["forward_ret"] >= threshold).astype(int)
-        return group
-
+    # 用 transform 避免 pandas 3.0 groupby().apply() 移除 key 欄的問題
     print("計算相對強勢標籤...", flush=True)
-    combined = combined.groupby("date", group_keys=False).apply(_relative_label)
+    threshold_per_day = combined.groupby("date")["forward_ret"].transform(
+        lambda x: x.quantile(1 - RELATIVE_TOP_PCT)
+    )
+    combined["label"] = (combined["forward_ret"] >= threshold_per_day).astype(int)
     combined = combined.dropna(subset=["label"])
 
     X = combined[FEATURE_COLS].astype(float)
