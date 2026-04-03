@@ -874,4 +874,12 @@ if __name__ == "__main__":
         sync_monthly_revenue(conn)
 
     conn.close()
+
+    # 同步標籤（不需要 conn，獨立操作）
+    try:
+        from sync_tags import sync_tags
+        sync_tags()
+    except Exception as e:
+        print(f"[WARN] 標籤同步失敗: {e}", flush=True)
+
     print("完成！", flush=True)

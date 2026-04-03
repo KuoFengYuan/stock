@@ -4,7 +4,7 @@ XGBoost 模型訓練
 輸出：ml/model.pkl
 
 改進：
-1. 標籤改為「相對強勢」：60日報酬排在全市場前30%，消除大盤環境影響
+1. 混合標籤：相對強勢前30% + 絕對報酬>0（避免熊市學「虧少」）
 2. 過濾除權息污染：相鄰日收盤跌超過20%視為除權，排除其後60日的label
 3. 樣本不平衡處理：設定 scale_pos_weight
 4. 儲存 mean_auc 供 predict.py 動態調整 ML 權重
@@ -107,13 +107,17 @@ def train():
         cutoff = all_dates[-FORWARD_DAYS]
         combined = combined[combined["date"] < cutoff]
 
-    # ── 相對強勢標籤：同一天所有股票 forward_ret 排名前 30% 為正例 ──
-    # 用 transform 避免 pandas 3.0 groupby().apply() 移除 key 欄的問題
-    print("計算相對強勢標籤...", flush=True)
+    # ── 混合標籤：相對強勢前30% 且 絕對報酬 > 0 ──
+    # 純相對標籤在熊市會把「虧少的」當正例，模型學到「跌少」而非「會漲」
+    # 加入絕對報酬 > 0 的條件，確保正例真的賺錢
+    print("計算混合標籤（相對強勢 + 絕對獲利）...", flush=True)
     threshold_per_day = combined.groupby("date")["forward_ret"].transform(
         lambda x: x.quantile(1 - RELATIVE_TOP_PCT)
     )
-    combined["label"] = (combined["forward_ret"] >= threshold_per_day).astype(int)
+    combined["label"] = (
+        (combined["forward_ret"] >= threshold_per_day) &
+        (combined["forward_ret"] > 0)
+    ).astype(int)
     combined = combined.dropna(subset=["label"])
 
     X = combined[FEATURE_COLS].astype(float)

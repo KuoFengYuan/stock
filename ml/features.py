@@ -161,10 +161,12 @@ def _get_fund_timeseries(symbol: str, all_financials: dict, date_index: pd.Datet
         return {}
 
     def announce_date(year, quarter):
+        # 保守估計公告日，避免 lookahead bias
+        # Q4 法定期限 3/31 但多數公司到 4 月底才公告
         if quarter == 1:   return pd.Timestamp(year, 5, 15)
         elif quarter == 2: return pd.Timestamp(year, 8, 14)
         elif quarter == 3: return pd.Timestamp(year, 11, 14)
-        else:              return pd.Timestamp(year + 1, 3, 31)
+        else:              return pd.Timestamp(year + 1, 4, 30)
 
     df = pd.DataFrame(records)
     df["announce_date"] = df.apply(lambda r: announce_date(r["year"], r["quarter"]), axis=1)
@@ -341,3 +343,57 @@ def _get_fund_features(symbol: str, conn, price: float | None = None) -> dict:
                 result["pb_ratio"] = price / bvps
 
     return result
+
+
+def _load_all_monthly_revenue(conn) -> dict:
+    """載入所有月營收資料，回傳 {symbol: list of dicts}"""
+    rows = conn.execute(
+        "SELECT symbol, year, month, revenue, yoy, mom FROM monthly_revenue ORDER BY symbol, year, month"
+    ).fetchall()
+    if not rows:
+        return {}
+    result = {}
+    for r in rows:
+        s = r[0]
+        if s not in result:
+            result[s] = []
+        result[s].append({"year": r[1], "month": r[2], "revenue": r[3], "yoy": r[4], "mom": r[5]})
+    return result
+
+
+def _get_monthly_rev_timeseries(symbol: str, all_monthly: dict, date_index: pd.DatetimeIndex) -> dict:
+    """
+    把月營收轉成時序特徵，對齊到 date_index。
+    回傳 dict of pd.Series: rev_consecutive_yoy, rev_accel
+    """
+    records = all_monthly.get(symbol, [])
+    if len(records) < 3:
+        return {}
+
+    df = pd.DataFrame(records)
+    # 每月營收公告日約為次月10號
+    df["date"] = df.apply(
+        lambda r: pd.Timestamp(r["year"] + (1 if r["month"] == 12 else 0),
+                               (r["month"] % 12) + 1, 10),
+        axis=1
+    )
+    df = df.sort_values("date").set_index("date")
+
+    full_index = date_index.union(df.index)
+
+    # 連續 YoY > 0 的月數
+    yoy_positive = (df["yoy"].fillna(0) > 0).astype(int)
+    breaks = (yoy_positive == 0).cumsum()
+    consec = yoy_positive.groupby(breaks).cumsum()
+    consec_s = consec.reindex(full_index).ffill().fillna(0).reindex(date_index)
+
+    # 加速成長：本月 YoY > 上月 YoY > 0
+    yoy_s = df["yoy"]
+    yoy_prev = yoy_s.shift(1)
+    accel = ((yoy_s > yoy_prev) & (yoy_prev > 0)).astype(int)
+    accel_s = accel.reindex(full_index).ffill().fillna(0).reindex(date_index)
+
+    return {
+        "rev_consecutive_yoy": consec_s,
+        "rev_accel": accel_s,
+    }

@@ -33,6 +33,11 @@ export interface Financials {
   totalDebt?: number
 }
 
+export interface StockTag {
+  tag: string
+  sub_tag: string | null
+}
+
 export interface RecommendationItem {
   symbol: string
   name: string
@@ -43,6 +48,7 @@ export interface RecommendationItem {
   changePct: number | null
   volume: number
   reasons: string[]
+  tags: StockTag[]
   // 基本面
   peRatio?: number
   pbRatio?: number

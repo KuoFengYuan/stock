@@ -1,10 +1,14 @@
 """
 規則引擎：計算技術指標 + 基本面指標，產生推薦清單
-改進：
-1. base_score 底分從 0.45 降為對齊市場基準勝率（由 rule_scores.json 讀取）
-2. 技術規則全部移出評分，只保留基本面規則決定 base_score
-3. 大盤擇時：市場勝率 < 0.42 時提高門檻，> 0.55 時降低門檻
-4. 籌碼邏輯加入絕對額度門檻，避免小量賣出誤判
+用法：python ml/rule_engine.py
+
+評分架構（修正版）：
+- base = 底分（市場基準）+ 基本面超額勝率遞減加成
+- × 估值乘數 × 月營收乘數 × 籌碼乘數
+- + 技術面微調 ±0.04
+- 動態門檻依大盤環境調整
+
+籌碼單位：DB 存的是「股」，500張 = 500,000股
 """
 import sys
 import sqlite3
@@ -41,8 +45,13 @@ def _load_rule_scores() -> tuple[dict, set, float]:
                     break
         for rule, v in data.get("rules", {}).items():
             scores[rule] = v["score"]
-            if v["status"] == "ok" and v.get("win_rate") is not None and v["win_rate"] < mkt_baseline:
+            status = v.get("status", "")
+            # 抑制：勝率低於市場基準 或 樣本不足（low_confidence）
+            if status in ("ok", "low_confidence") and v.get("win_rate") is not None and v["win_rate"] < mkt_baseline:
                 suppressed.add(rule)
+            if status == "low_confidence":
+                # 低信心結果不完全採用，向 fallback 靠攏（已在 backtest 端處理）
+                pass
         return scores, suppressed, float(mkt_baseline)
     except Exception:
         return {}, set(), 0.45
@@ -145,6 +154,7 @@ def calc_fundamentals(symbol: str, conn) -> dict:
     if eps_parts:
         result["eps_ttm"] = sum(eps_parts)
 
+    # TTM 淨利（最近4季加總）
     ni_list = [r["net_income"] for r in rows[:4] if r["net_income"] is not None]
     if len(ni_list) >= 2:
         result["ni_ttm"] = sum(ni_list)
@@ -167,6 +177,7 @@ def calc_fundamentals(symbol: str, conn) -> dict:
     if len(rows) >= 5 and rows[0]["revenue"] and rows[4]["revenue"] and rows[4]["revenue"] > 0:
         result["revenue_yoy"] = (rows[0]["revenue"] - rows[4]["revenue"]) / rows[4]["revenue"] * 100
 
+    # 淨利 YoY（基期需為正且有一定規模，避免從虧損微轉盈造成失真大數）
     if len(rows) >= 5 and rows[0]["net_income"] and rows[4]["net_income"]:
         base_ni = rows[0]["net_income"]
         prev_ni = rows[4]["net_income"]
@@ -204,7 +215,6 @@ def calc_pe_pb(symbol: str, conn, close: float) -> dict:
             eps_ttm_parts.append(r["net_income"] / shares)
 
     eps_ttm = sum(eps_ttm_parts) if eps_ttm_parts else None
-    # 負 EPS 時 PE 無意義
     if eps_ttm and eps_ttm > 0:
         result["pe_ratio"] = close / eps_ttm
 
@@ -217,6 +227,8 @@ def calc_pe_pb(symbol: str, conn, close: float) -> dict:
 
 
 def calc_monthly_revenue(symbol: str, conn) -> dict:
+    """計算營收連續成長指標。優先用月營收表，無資料時 fallback 到季營收。"""
+    # 嘗試月營收
     rows = conn.execute(
         """SELECT year, month, revenue, yoy, mom
            FROM monthly_revenue WHERE symbol=?
@@ -224,9 +236,15 @@ def calc_monthly_revenue(symbol: str, conn) -> dict:
         (symbol,)
     ).fetchall()
 
-    if len(rows) < 2:
-        return {}
+    if len(rows) >= 2:
+        return _calc_monthly_rev_indicators(rows)
 
+    # Fallback：用季營收（financials 表）計算連續 YoY 成長
+    return _calc_quarterly_rev_indicators(symbol, conn)
+
+
+def _calc_monthly_rev_indicators(rows) -> dict:
+    """從月營收資料計算指標"""
     result = {}
 
     consecutive_yoy = 0
@@ -254,6 +272,51 @@ def calc_monthly_revenue(symbol: str, conn) -> dict:
     return result
 
 
+def _calc_quarterly_rev_indicators(symbol: str, conn) -> dict:
+    """從季營收（financials）計算連續 YoY 成長（月營收的替代方案）"""
+    rows = conn.execute(
+        """SELECT year, quarter, revenue
+           FROM financials WHERE symbol=? AND revenue IS NOT NULL AND revenue > 0
+           ORDER BY year DESC, quarter DESC LIMIT 8""",
+        (symbol,)
+    ).fetchall()
+
+    if len(rows) < 5:
+        return {}
+
+    result = {}
+
+    # 計算每季 YoY（當季 vs 去年同季）
+    # rows[0]=最新, rows[4]=去年同季, rows[1] vs rows[5], ...
+    yoy_list = []
+    for i in range(min(4, len(rows) - 4)):
+        cur = rows[i]["revenue"]
+        prev = rows[i + 4]["revenue"] if (i + 4) < len(rows) else None
+        if cur and prev and prev > 0:
+            yoy_list.append((cur - prev) / prev * 100)
+        else:
+            yoy_list.append(None)
+
+    # 連續季營收 YoY > 0
+    consecutive = 0
+    for y in yoy_list:
+        if y is not None and y > 0:
+            consecutive += 1
+        else:
+            break
+
+    if consecutive > 0:
+        # 季度轉月度近似：1季 ≈ 3個月
+        result["rev_consecutive_yoy"] = consecutive * 3
+
+    # 加速成長：最新季 YoY > 前一季 YoY > 0
+    if len(yoy_list) >= 2 and yoy_list[0] is not None and yoy_list[1] is not None:
+        if yoy_list[0] > yoy_list[1] > 0:
+            result["rev_accel"] = True
+
+    return result
+
+
 def _calc_high_1y(df: pd.DataFrame) -> float | None:
     if "high" not in df.columns or "close" not in df.columns:
         return None
@@ -271,27 +334,40 @@ def _s(rule: str, fallback: float) -> float:
     return _RULE_SCORES.get(rule, fallback)
 
 
+def _excess_win(rule: str, fallback: float) -> float:
+    """
+    規則的超額勝率（rule win_rate - market win_rate）。
+    這才是規則真正的 alpha，避免 raw win_rate 直接當分數加總導致飽和。
+    """
+    raw = _RULE_SCORES.get(rule)
+    if raw is not None:
+        return max(0.0, raw - _BACKTEST_MKT_WIN_RATE)
+    return fallback
+
+
 def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = None,
                 market_win_rate: float = 0.5) -> tuple[list[str], str, float]:
     """
     中長期選股邏輯。
 
-    改進：
-    1. base_score 底分對齊市場基準（用回測市場勝率，而非固定 0.45）
-    2. 技術規則全部移出評分核心，只做輕微加/減分（±0.02），且被抑制時不加分
-    3. 大盤擇時：市場勝率 < 0.42 為熊市，自動提高 buy/watch 門檻
-    4. 籌碼加入絕對額度門檻（< 500張不計）避免小量干擾
+    評分架構（修正版）：
+    - base = 底分（市場基準 0.38~0.48）
+    - + 基本面超額勝率，遞減加成（最強100% -> 第二40% -> 第三20% -> 之後10%）
+    - x 估值乘數 x 月營收乘數 x 籌碼乘數
+    - + 技術面微調 +/-0.04
+    - 動態門檻依大盤環境調整
     """
     reasons = []
     has_fundamental = False
 
-    # ══ 前置過濾 ══
+    # == 前置過濾 ==
     high_1y = tech.get("high_1y")
     if high_1y is not None and high_1y > 0 and close > 0:
         drawdown = (close - high_1y) / high_1y
         if drawdown < -0.6:
             return [f"⚠ 近一年跌幅 {drawdown*100:.0f}%"], "neutral", 0.3
 
+    # TTM 淨利為負（ROE < 0 或 ni_ttm < 0）-> 持續虧損，直接不推薦
     roe_check = fund.get("roe")
     ni_ttm_check = fund.get("ni_ttm")
     if roe_check is not None and roe_check < 0:
@@ -305,45 +381,57 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
 
     _r20 = tech.get("return20d")
 
-    # ══ 第一層：基本面品質 → 決定 base_score ══
-    # base_score 底分改為對齊回測市場基準勝率（熊市自動降低預設底分）
+    # == 第一層：基本面品質 -> 遞減加成 ==
     base_floor = max(0.38, min(_BACKTEST_MKT_WIN_RATE, 0.48))
-    base_score = base_floor
+
+    # 收集觸發的基本面訊號及其超額勝率
+    fund_signals: list[tuple[str, float]] = []
 
     roe = fund.get("roe")
     if roe is not None:
         if roe >= 20:
             reasons.append(f"ROE {roe:.1f}%")
-            base_score += _s("roe_high", 0.20)
+            fund_signals.append(("roe_high", _excess_win("roe_high", 0.08)))
             has_fundamental = True
         elif roe >= 12:
             reasons.append(f"ROE {roe:.1f}%")
-            base_score += _s("roe_ok", 0.10)
+            fund_signals.append(("roe_ok", _excess_win("roe_ok", 0.05)))
             has_fundamental = True
 
     revenue_yoy = fund.get("revenue_yoy")
     revenue_abs = fund.get("revenue_abs")
     if revenue_yoy is not None and revenue_yoy > 5 and revenue_abs is not None and revenue_abs >= 1e8:
         reasons.append(f"營收 YoY +{revenue_yoy:.0f}%")
-        base_score += _s("revenue_yoy", 0.08)
+        fund_signals.append(("revenue_yoy", _excess_win("revenue_yoy", 0.04)))
         has_fundamental = True
 
     ni_yoy = fund.get("ni_yoy")
     if ni_yoy is not None and ni_yoy > 10:
         reasons.append(f"獲利 YoY +{ni_yoy:.0f}%")
-        base_score += _s("ni_yoy", 0.12)
+        fund_signals.append(("ni_yoy", _excess_win("ni_yoy", 0.04)))
         has_fundamental = True
 
     debt_ratio = fund.get("debt_ratio")
     if debt_ratio is not None and debt_ratio < 50:
-        base_score += _s("debt_low", 0.04)
-
-    base_score = min(base_score, 0.70)
+        fund_signals.append(("debt_low", _excess_win("debt_low", 0.02)))
 
     if not has_fundamental:
         return [], "neutral", 0.3
 
-    # ══ 第二層：估值乘數 ══
+    # 遞減加成：最強訊號 100%，第二 40%，第三 20%，之後 10%
+    fund_signals.sort(key=lambda x: x[1], reverse=True)
+    decay_weights = [1.0, 0.4, 0.2, 0.1, 0.1]
+    fund_bonus = 0.0
+    for i, (rule_name, excess) in enumerate(fund_signals):
+        if rule_name in _SUPPRESSED_RULES:
+            continue
+        w = decay_weights[i] if i < len(decay_weights) else 0.1
+        fund_bonus += excess * w
+
+    base_score = base_floor + fund_bonus
+    base_score = min(base_score, 0.58)  # 純基本面上限，留空間給乘數
+
+    # == 第二層：估值乘數 ==
     pe = fund.get("pe_ratio")
     pb = fund.get("pb_ratio")
     val_mult = 1.0
@@ -367,7 +455,7 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
         elif pb > 4:
             val_mult *= 0.90
 
-    # 短期漲幅過大懲罰（未達前置過濾門檻但仍偏貴）
+    # 短期漲幅過大懲罰
     if _r20 is not None:
         if _r20 > 20:
             reasons.append(f"⚠ 追高風險：近20日漲 {_r20:.0f}%")
@@ -378,7 +466,7 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
 
     val_mult = max(0.70, min(val_mult, 1.15))
 
-    # ══ 第三層：月營收乘數 ══
+    # == 第三層：月營收乘數（使用固定乘數，不從 rule_scores 讀取）==
     rev_mult = 1.0
     if monthly:
         consecutive_yoy = monthly.get("rev_consecutive_yoy", 0)
@@ -387,30 +475,32 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
 
         if consecutive_yoy >= 6:
             reasons.append(f"月營收年增連 {consecutive_yoy} 個月")
-            rev_mult = _s("rev_yoy_6m", 1.12)
+            rev_mult = 1.12
             has_fundamental = True
             if consecutive_mom >= 3:
                 reasons.append(f"月營收月增連 {consecutive_mom} 個月")
             if rev_accel:
                 reasons.append("月營收成長加速")
+                rev_mult = 1.15
         elif consecutive_yoy >= 3:
             reasons.append(f"月營收年增連 {consecutive_yoy} 個月")
-            rev_mult = _s("rev_yoy_3m", 1.07)
+            rev_mult = 1.07
             has_fundamental = True
             if rev_accel:
                 reasons.append("月營收成長加速")
+                rev_mult = 1.10
         elif consecutive_mom >= 3:
             reasons.append(f"月營收月增連 {consecutive_mom} 個月")
-            rev_mult = _s("rev_mom_3m", 1.04)
+            rev_mult = 1.04
         elif rev_accel:
             reasons.append("月營收成長加速")
-            rev_mult = _s("rev_accel", 1.03)
+            rev_mult = 1.03
 
     rev_mult = max(1.0, min(rev_mult, 1.15))
 
-    # ══ 第四層：籌碼乘數 ══
-    # 加入絕對額度門檻（500張），避免小量法人操作誤判
-    CHIP_MIN_ABS = 500  # 張
+    # == 第四層：籌碼乘數 ==
+    # DB 存的是「股」，500張 = 500,000股
+    CHIP_MIN_ABS = 500_000  # 股（= 500 張）
     foreign_60d = tech.get("foreign_net_60d") or tech.get("foreign_net_20d")
     trust_60d   = tech.get("trust_net_60d")   or tech.get("trust_net_20d")
     foreign_10d = tech.get("foreign_net_10d")
@@ -418,10 +508,10 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
 
     chip_mult = 1.0
     if foreign_60d is not None and foreign_60d > CHIP_MIN_ABS:
-        reasons.append(f"外資60日淨買 {foreign_60d/1e3:,.0f}張")
+        reasons.append(f"外資60日淨買 {foreign_60d/1000:,.0f}張")
         chip_mult *= 1.05
     if trust_60d is not None and trust_60d > CHIP_MIN_ABS:
-        reasons.append(f"投信60日淨買 {trust_60d/1e3:,.0f}張")
+        reasons.append(f"投信60日淨買 {trust_60d/1000:,.0f}張")
         chip_mult *= 1.05
 
     foreign_selling = foreign_10d is not None and foreign_10d < -CHIP_MIN_ABS
@@ -430,28 +520,33 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     trust_buying    = trust_10d   is not None and trust_10d   > CHIP_MIN_ABS
     chip_warning    = foreign_selling and trust_selling
 
+    # 格式化張數顯示
+    def _chip_str(val):
+        v = abs(val) / 1000
+        return f"{v:,.0f}張"
+
     if foreign_buying and trust_selling:
         f, t = abs(foreign_10d), abs(trust_10d)
         if t > f * 3:
-            reasons.append("⚠ 投信大賣／外資小買（近10日）")
+            reasons.append(f"⚠ 投信大賣 -{_chip_str(trust_10d)}／外資小買 +{_chip_str(foreign_10d)}（近10日）")
             chip_mult *= 0.88
         else:
-            reasons.append("外資買超／投信賣超（近10日）")
+            reasons.append(f"外資買超 +{_chip_str(foreign_10d)}／投信賣超 -{_chip_str(trust_10d)}（近10日）")
     elif foreign_selling and trust_buying:
         f, t = abs(foreign_10d), abs(trust_10d)
         if f > t * 3:
-            reasons.append("⚠ 外資大賣／投信小買（近10日）")
+            reasons.append(f"⚠ 外資大賣 -{_chip_str(foreign_10d)}／投信小買 +{_chip_str(trust_10d)}（近10日）")
             chip_mult *= 0.88
         else:
-            reasons.append("投信買超／外資賣超（近10日）")
+            reasons.append(f"投信買超 +{_chip_str(trust_10d)}／外資賣超 -{_chip_str(foreign_10d)}（近10日）")
 
     if chip_warning:
-        reasons.append("⚠ 法人近10日同步賣超")
+        reasons.append(f"⚠ 法人近10日同步賣超（外資 -{_chip_str(foreign_10d)} 投信 -{_chip_str(trust_10d)}）")
         chip_mult *= 0.82
 
     chip_mult = max(0.80, min(chip_mult, 1.10))
 
-    # ══ 第五層：技術微調（±0.02，被抑制時不加分）══
+    # == 第五層：技術微調（+/-0.02，被抑制時不加分）==
     tech_adj = 0.0
     rsi = tech.get("rsi14")
     sma60 = tech.get("sma60")
@@ -476,17 +571,13 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
 
     tech_adj = max(-0.04, min(tech_adj, 0.04))
 
-    # ══ 最終分數 ══
+    # == 最終分數 ==
     score = base_score * val_mult * rev_mult * chip_mult + tech_adj
     score = min(max(score, 0.0), 1.0)
 
-    # ══ 動態門檻：大盤擇時 ══
-    # market_win_rate < 0.42 → 熊市，提高門檻（減少誤判）
-    # market_win_rate > 0.55 → 牛市，略降門檻
-    # 基準：market_win_rate = 0.50 時，buy=0.56, watch=0.50
+    # == 動態門檻：大盤擇時 ==
     buy_thresh   = 0.56 + (market_win_rate - 0.50) * 0.30
     watch_thresh = 0.50 + (market_win_rate - 0.50) * 0.30
-    # 熊市下限：buy 至少 0.58，watch 至少 0.52
     if market_win_rate < 0.42:
         buy_thresh   = max(buy_thresh, 0.58)
         watch_thresh = max(watch_thresh, 0.52)
@@ -608,14 +699,20 @@ def run_rule_engine():
                 (
                     symbol, latest_date, score, signal,
                     json.dumps(features), json.dumps(reasons),
-                    "rule_v4", int(time.time() * 1000)
+                    "rule_v5", int(time.time() * 1000)
                 )
             )
             count += 1
-            print(f"  {symbol}: score={score:.2f} signal={signal} reasons={reasons}", flush=True)
+            try:
+                print(f"  {symbol}: score={score:.2f} signal={signal} reasons={reasons}", flush=True)
+            except UnicodeEncodeError:
+                print(f"  {symbol}: score={score:.2f} signal={signal} reasons=({len(reasons)} items)", flush=True)
 
         except Exception as e:
-            print(f"  [WARN] {symbol}: {e}", flush=True)
+            try:
+                print(f"  [WARN] {symbol}: {e}", flush=True)
+            except UnicodeEncodeError:
+                print(f"  [WARN] {symbol}: (encoding error)", flush=True)
 
     conn.commit()
     conn.execute(

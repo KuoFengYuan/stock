@@ -86,6 +86,16 @@ export async function GET(req: NextRequest) {
     close: number; prev_close: number; prev_date: string; volume: number; reasons_json: string;
   }[]
 
+  // 預載所有 stock_tags（一次查詢）
+  const tagRows = db.prepare(
+    'SELECT symbol, tag, sub_tag FROM stock_tags'
+  ).all() as { symbol: string; tag: string; sub_tag: string | null }[]
+  const tagMap = new Map<string, { tag: string; sub_tag: string | null }[]>()
+  for (const t of tagRows) {
+    if (!tagMap.has(t.symbol)) tagMap.set(t.symbol, [])
+    tagMap.get(t.symbol)!.push({ tag: t.tag, sub_tag: t.sub_tag })
+  }
+
   const items = rows.map((row) => {
     // 前一交易日與當日相差超過 10 天 → 資料有缺口，不顯示漲跌幅
     const gapDays = row.prev_date && row.close
@@ -105,6 +115,7 @@ export async function GET(req: NextRequest) {
       changePct,
       volume: row.volume,
       reasons: row.reasons_json ? JSON.parse(row.reasons_json) : [],
+      tags: tagMap.get(row.symbol) || [],
     }
   })
 

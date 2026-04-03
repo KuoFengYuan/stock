@@ -23,7 +23,8 @@ import numpy as np
 import pandas_ta as ta
 
 sys.path.insert(0, str(Path(__file__).parent))
-from features import _calc_price_features, _get_fund_timeseries, _load_all_financials
+from features import (_calc_price_features, _get_fund_timeseries, _load_all_financials,
+                      _load_all_monthly_revenue, _get_monthly_rev_timeseries)
 
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 RULE_SCORES_PATH = Path(__file__).parent / "rule_scores.json"
@@ -44,7 +45,15 @@ FALLBACK_SCORES = {
     "revenue_yoy":       0.75,
     "ni_yoy":            0.80,
     "debt_low":          0.60,
+    # 月營收規則（之前缺失，導致 rule_engine 永遠用 fallback）
+    "rev_yoy_6m":        0.75,
+    "rev_yoy_3m":        0.65,
+    "rev_mom_3m":        0.60,
+    "rev_accel":         0.60,
 }
+
+# 回測結果可信度門檻：樣本不足時降低權重而非直接採用
+MIN_RELIABLE_SAMPLES = 200
 
 
 def _load_price_panel(conn) -> dict:
@@ -100,7 +109,8 @@ def _append_triggers(triggers: dict, rule: str, symbol: str, mask: pd.Series, fw
     triggers[rule].extend(zip([symbol] * len(idx), idx, rets))
 
 
-def _build_tech_triggers(panel: dict, all_financials: dict, forward_days: int) -> dict:
+def _build_tech_triggers(panel: dict, all_financials: dict, forward_days: int,
+                         all_monthly: dict | None = None) -> dict:
     triggers = {rule: [] for rule in FALLBACK_SCORES}
 
     total = len(panel)
@@ -183,6 +193,17 @@ def _build_tech_triggers(panel: dict, all_financials: dict, forward_days: int) -
         if debt_ratio is not None:
             _append_triggers(triggers, "debt_low", symbol, debt_ratio < 50, fwd_ret)
 
+        # 月營收規則
+        if all_monthly:
+            rev_ts = _get_monthly_rev_timeseries(symbol, all_monthly, feats.index)
+            consec_yoy = rev_ts.get("rev_consecutive_yoy")
+            rev_accel_s = rev_ts.get("rev_accel")
+            if consec_yoy is not None:
+                _append_triggers(triggers, "rev_yoy_6m", symbol, consec_yoy >= 6, fwd_ret)
+                _append_triggers(triggers, "rev_yoy_3m", symbol, (consec_yoy >= 3) & (consec_yoy < 6), fwd_ret)
+            if rev_accel_s is not None:
+                _append_triggers(triggers, "rev_accel", symbol, rev_accel_s > 0, fwd_ret)
+
     return triggers
 
 
@@ -204,7 +225,8 @@ def _dedup_fundamental_triggers(trigger_list: list) -> list:
 
 def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int, forward_days: int,
                     market_abs_win_rate: float = 0.45) -> dict:
-    FUND_RULES = {"roe_high", "roe_ok", "revenue_yoy", "ni_yoy", "debt_low"}
+    FUND_RULES = {"roe_high", "roe_ok", "revenue_yoy", "ni_yoy", "debt_low",
+                   "rev_yoy_6m", "rev_yoy_3m", "rev_mom_3m", "rev_accel"}
     results = {}
 
     for rule, tlist in triggers.items():
@@ -263,6 +285,8 @@ def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int,
         excess_win_rate = float(np.mean(exc_arr > 0)) if len(exc_arr) >= min_samples else None
         avg_excess = float(np.mean(exc_arr) * 100) if len(exc_arr) >= min_samples else None
 
+        # 樣本可信度：< MIN_RELIABLE_SAMPLES 時標記為 low_confidence
+        reliable = len(abs_arr) >= MIN_RELIABLE_SAMPLES
         score = win_rate
 
         results[rule] = {
@@ -272,8 +296,9 @@ def _calc_win_rates(triggers: dict, market_returns: pd.Series, min_samples: int,
             "avg_return_pct": round(avg_return, 4),
             "sample_count": n,
             "valid_sample_count": len(abs_arr),
+            "reliable": reliable,
             "score": round(score, 4),
-            "status": "ok",
+            "status": "ok" if reliable else "low_confidence",
             "market_abs_win_rate": round(market_abs_win_rate, 4),
         }
 
@@ -321,6 +346,9 @@ def run_backtest(forward_days: int = 60, min_samples: int = 30, multi_horizon: b
 
     print("載入財務資料...", flush=True)
     all_financials = _load_all_financials(conn)
+    print("載入月營收資料...", flush=True)
+    all_monthly = _load_all_monthly_revenue(conn)
+    print(f"  有月營收資料：{len(all_monthly)} 檔", flush=True)
     conn.close()
 
     best_horizon = forward_days
@@ -334,7 +362,7 @@ def run_backtest(forward_days: int = 60, min_samples: int = 30, multi_horizon: b
         market_returns = _compute_market_returns(panel, fwd)
 
         print("枚舉規則觸發點...", flush=True)
-        triggers = _build_tech_triggers(panel, all_financials, fwd)
+        triggers = _build_tech_triggers(panel, all_financials, fwd, all_monthly)
 
         print("計算市場個股基準勝率...", flush=True)
         all_raw_win = []

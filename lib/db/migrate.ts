@@ -118,6 +118,16 @@ export function runMigrations() {
       UNIQUE(symbol, year, month)
     );
     CREATE INDEX IF NOT EXISTS idx_monthly_rev_symbol ON monthly_revenue(symbol, year DESC, month DESC);
+
+    CREATE TABLE IF NOT EXISTS stock_tags (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      symbol   TEXT NOT NULL REFERENCES stocks(symbol),
+      tag      TEXT NOT NULL,
+      sub_tag  TEXT,
+      UNIQUE(symbol, tag, sub_tag)
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_tags_tag ON stock_tags(tag);
+    CREATE INDEX IF NOT EXISTS idx_stock_tags_symbol ON stock_tags(symbol);
   `)
 
   sqlite.close()

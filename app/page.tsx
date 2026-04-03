@@ -202,7 +202,14 @@ export default function HomePage() {
 function RecommendationTable({ items }: { items: RecommendationItem[] }) {
   const [signalFilter, setSignalFilter] = useState<'all' | 'buy' | 'watch' | 'neutral'>('all')
 
-  const filtered = signalFilter === 'all' ? items : items.filter(i => i.signal === signalFilter)
+  // AI 概念股排前面（同 signal 內 AI 優先，再依 score 排序）
+  const sorted = [...items].sort((a, b) => {
+    const aAI = a.tags?.some(t => t.tag === 'AI') ? 1 : 0
+    const bAI = b.tags?.some(t => t.tag === 'AI') ? 1 : 0
+    if (bAI !== aAI) return bAI - aAI
+    return b.score - a.score
+  })
+  const filtered = signalFilter === 'all' ? sorted : sorted.filter(i => i.signal === signalFilter)
 
   const counts = {
     all: items.length,
@@ -252,11 +259,23 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
         <tbody>
           {filtered.map((item) => (
             <tr key={item.symbol} className="border-b border-slate-800 hover:bg-slate-800/50 transition-colors">
-              <td className="py-3 px-3 whitespace-nowrap">
-                <a href={`/stocks/${item.symbol}`} className="text-blue-400 hover:text-blue-300 font-medium">
-                  {item.symbol.replace('.TW', '').replace('.TWO', '')}
-                </a>
-                <span className="text-slate-400 ml-2 text-xs">{item.name}</span>
+              <td className="py-3 px-3">
+                <div className="flex items-center gap-1.5 whitespace-nowrap">
+                  <a href={`/stocks/${item.symbol}`} className="text-blue-400 hover:text-blue-300 font-medium">
+                    {item.symbol.replace('.TW', '').replace('.TWO', '')}
+                  </a>
+                  <span className="text-slate-400 text-xs">{item.name}</span>
+                  {item.tags?.some(t => t.tag === 'AI') && (
+                    <span className="text-[10px] px-1.5 py-0 rounded bg-violet-900/60 text-violet-300 border border-violet-700/60 font-medium">AI</span>
+                  )}
+                </div>
+                {item.tags?.some(t => t.tag === 'AI') && (
+                  <div className="flex flex-wrap gap-1 mt-0.5">
+                    {[...new Set(item.tags.filter(t => t.tag === 'AI' && t.sub_tag).map(t => t.sub_tag))].map((sub, i) => (
+                      <span key={i} className="text-[10px] px-1.5 py-0 rounded bg-slate-800 text-violet-400/80">{sub}</span>
+                    ))}
+                  </div>
+                )}
               </td>
               <td className="py-3 px-3 whitespace-nowrap">
                 <span className={`text-xs px-2 py-0.5 rounded ${item.market === 'TSE' ? 'bg-blue-900/50 text-blue-300' : 'bg-purple-900/50 text-purple-300'}`}>
