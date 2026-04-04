@@ -25,9 +25,7 @@ FEATURE_COLS = [
     # 基本面（已修正 lookahead bias）
     "eps_ttm", "roe", "debt_ratio", "revenue_yoy", "ni_yoy",
     "pe_ratio", "pb_ratio",
-    # 籌碼面
-    "foreign_net_60d",
-    "trust_net_60d",
+    # 籌碼面（foreign_net_60d/trust_net_60d 覆蓋率僅 30%，改由規則引擎處理）
     "margin_balance_chg",
     "short_balance_chg",
 ]
@@ -318,8 +316,10 @@ def _get_monthly_rev_timeseries(symbol: str, all_monthly: dict, date_index: pd.D
         axis=1
     )
     df = df.sort_values("date").set_index("date")
+    df = df[~df.index.duplicated(keep="last")]
 
     full_index = date_index.union(df.index)
+    full_index = full_index.drop_duplicates().sort_values()
 
     # 連續 YoY > 0 的月數
     yoy_positive = (df["yoy"].fillna(0) > 0).astype(int)

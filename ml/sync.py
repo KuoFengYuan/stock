@@ -693,164 +693,110 @@ def sync_chips(conn):
     return inst_total + margin_total
 
 
-def _fetch_twse_monthly_revenue(year: int, month: int) -> dict[str, float]:
-    """抓 TWSE 上市公司單月營收（MOPS 公開資訊觀測站）"""
-    result = {}
+def _fetch_monthly_revenue_finmind(code: str, start_date: str) -> list[dict]:
+    """用 FinMind API 抓單一股票月營收。回傳 [{year, month, revenue}, ...]"""
     try:
-        # TWSE 透過 MOPS 取月營收
-        url = "https://mops.twse.com.tw/server-java/t05st10_ifrs"
-        data = {
-            "encodeURIComponent": "1",
-            "step": "1",
-            "firstin": "1",
-            "off": "1",
-            "keyword4": "",
-            "code1": "",
-            "TYPEK2": "",
-            "checkbtn": "",
-            "queryName": "co_id",
-            "inpuType": "co_id",
-            "TYPEK": "all",
-            "isnew": "false",
-            "co_id": "",
-            "year": str(year - 1911),  # 民國年
-            "month": f"{month:02d}",
-        }
-        r = SESSION.post(url, data=data, timeout=20)
-        r.encoding = "big5"
-        # 解析 HTML 表格
-        tables = pd.read_html(r.text, header=0)
-        for tbl in tables:
-            for _, row in tbl.iterrows():
-                try:
-                    code = str(row.iloc[0]).strip().zfill(4)
-                    rev_str = str(row.iloc[2]).replace(",", "")
-                    rev = float(rev_str)
-                    if rev > 0 and code in TSE_SYMBOLS:
-                        result[code] = rev
-                except Exception:
-                    pass
-    except Exception as e:
-        print(f"  [MOPS TWSE ERROR] {year}/{month}: {e}", flush=True)
-    return result
-
-
-def _fetch_tpex_monthly_revenue(year: int, month: int) -> dict[str, float]:
-    """抓 TPEX 上櫃公司單月營收"""
-    result = {}
-    try:
-        url = "https://mops.twse.com.tw/server-java/t05st10_ifrs"
-        data = {
-            "encodeURIComponent": "1",
-            "step": "1",
-            "firstin": "1",
-            "off": "1",
-            "keyword4": "",
-            "code1": "",
-            "TYPEK2": "",
-            "checkbtn": "",
-            "queryName": "co_id",
-            "inpuType": "co_id",
-            "TYPEK": "otc",
-            "isnew": "false",
-            "co_id": "",
-            "year": str(year - 1911),
-            "month": f"{month:02d}",
-        }
-        r = SESSION.post(url, data=data, timeout=20)
-        r.encoding = "big5"
-        tables = pd.read_html(r.text, header=0)
-        for tbl in tables:
-            for _, row in tbl.iterrows():
-                try:
-                    code = str(row.iloc[0]).strip().zfill(4)
-                    rev_str = str(row.iloc[2]).replace(",", "")
-                    rev = float(rev_str)
-                    if rev > 0 and code in OTC_SYMBOLS:
-                        result[code] = rev
-                except Exception:
-                    pass
-    except Exception as e:
-        print(f"  [MOPS TPEX ERROR] {year}/{month}: {e}", flush=True)
-    return result
+        r = SESSION.get(
+            f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMonthRevenue&data_id={code}&start_date={start_date}",
+            timeout=10
+        )
+        j = r.json()
+        if j.get("status") != 200:
+            return []
+        result = []
+        for d in j.get("data", []):
+            rev = d.get("revenue")
+            if rev and rev > 0:
+                result.append({
+                    "year": d["revenue_year"],
+                    "month": d["revenue_month"],
+                    "revenue": float(rev),  # 單位：元
+                })
+        return result
+    except Exception:
+        return []
 
 
 def sync_monthly_revenue(conn):
     """
-    同步月營收，並計算 YoY（年增率）與 MoM（月增率）。
-    增量更新：只抓資料庫中尚缺的年月。
+    同步月營收（FinMind API 逐檔抓取）。
+    增量更新：只抓 DB 中尚缺的資料。首次補近30個月（含去年同期，用於算 YoY）。
     """
     started_at = int(time.time() * 1000)
 
-    # 找出 DB 最新年月
     row = conn.execute("SELECT year, month FROM monthly_revenue ORDER BY year DESC, month DESC LIMIT 1").fetchone()
     if row:
-        latest_year, latest_month = row[0], row[1]
+        # 增量：從最新月開始抓（重抓最新月以防更新）
+        start_date = f"{row[0]}-{row[1]:02d}-01"
     else:
-        # 首次：補近18個月
-        d = date.today() - timedelta(days=540)
-        latest_year, latest_month = d.year, d.month
+        # 首次：補近30個月（確保有去年同期可算 YoY）
+        d = date.today() - timedelta(days=900)
+        start_date = d.strftime("%Y-%m-%d")
 
-    # 建立要抓的 (year, month) 清單
-    today = date.today()
-    ym_list = []
-    y, m = latest_year, latest_month
-    while (y, m) <= (today.year, today.month):
-        ym_list.append((y, m))
-        m += 1
-        if m > 12:
-            m, y = 1, y + 1
+    print(f"同步月營收（FinMind API），起始日 {start_date}...", flush=True)
 
-    if not ym_list:
-        print("月營收已是最新", flush=True)
+    all_symbols = list(ALL_STOCKS)
+    total = 0
+    batch = []
+
+    def _dl(symbol):
+        code = _code(symbol)
+        return symbol, _fetch_monthly_revenue_finmind(code, start_date)
+
+    WORKERS = 20  # FinMind 免費版限速，不能太快
+    done = 0
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {executor.submit(_dl, s): s for s in all_symbols}
+        for fut in as_completed(futures):
+            symbol, rows = fut.result()
+            for r in rows:
+                batch.append((symbol, r["year"], r["month"], r["revenue"]))
+            done += 1
+            if done % 200 == 0 or done == len(all_symbols):
+                print(f"  下載進度 {done}/{len(all_symbols)} ({done*100//len(all_symbols)}%)，暫存 {len(batch)} 筆", flush=True)
+
+    if not batch:
+        print("月營收：無新資料", flush=True)
+        log_sync(conn, "monthly_revenue", "success", 0, started_at=started_at)
         return 0
 
-    print(f"同步月營收，{len(ym_list)} 個年月...", flush=True)
-    total = 0
+    # 先寫入原始 revenue（不含 YoY/MoM）
+    for symbol, year, month, rev in batch:
+        conn.execute(
+            "INSERT OR REPLACE INTO monthly_revenue (symbol, year, month, revenue, yoy, mom) VALUES (?,?,?,?,NULL,NULL)",
+            (symbol, year, month, rev)
+        )
+        total += 1
+    conn.commit()
+    print(f"  已寫入 {total} 筆原始營收", flush=True)
 
-    for year, month in ym_list:
-        tse_rev = _fetch_twse_monthly_revenue(year, month)
-        otc_rev = _fetch_tpex_monthly_revenue(year, month)
-        combined = {
-            **{TSE_SYMBOLS[c]: v for c, v in tse_rev.items() if c in TSE_SYMBOLS},
-            **{OTC_SYMBOLS[c]: v for c, v in otc_rev.items() if c in OTC_SYMBOLS},
-        }
+    # 批量計算 YoY / MoM
+    updated = 0
+    for symbol, year, month, rev in batch:
+        prev_year_row = conn.execute(
+            "SELECT revenue FROM monthly_revenue WHERE symbol=? AND year=? AND month=?",
+            (symbol, year - 1, month)
+        ).fetchone()
+        yoy = (rev - prev_year_row[0]) / prev_year_row[0] * 100 if prev_year_row and prev_year_row[0] and prev_year_row[0] > 0 else None
 
-        if not combined:
-            print(f"  {year}/{month:02d}: 無資料（可能尚未公告）", flush=True)
-            continue
+        prev_m = month - 1 if month > 1 else 12
+        prev_m_y = year if month > 1 else year - 1
+        prev_month_row = conn.execute(
+            "SELECT revenue FROM monthly_revenue WHERE symbol=? AND year=? AND month=?",
+            (symbol, prev_m_y, prev_m)
+        ).fetchone()
+        mom = (rev - prev_month_row[0]) / prev_month_row[0] * 100 if prev_month_row and prev_month_row[0] and prev_month_row[0] > 0 else None
 
-        for symbol, rev in combined.items():
-            # 計算 YoY：去年同月
-            prev_year_row = conn.execute(
-                "SELECT revenue FROM monthly_revenue WHERE symbol=? AND year=? AND month=?",
-                (symbol, year - 1, month)
-            ).fetchone()
-            yoy = (rev - prev_year_row[0]) / prev_year_row[0] * 100 if prev_year_row and prev_year_row[0] else None
-
-            # 計算 MoM：上個月
-            prev_month = month - 1 if month > 1 else 12
-            prev_month_year = year if month > 1 else year - 1
-            prev_month_row = conn.execute(
-                "SELECT revenue FROM monthly_revenue WHERE symbol=? AND year=? AND month=?",
-                (symbol, prev_month_year, prev_month)
-            ).fetchone()
-            mom = (rev - prev_month_row[0]) / prev_month_row[0] * 100 if prev_month_row and prev_month_row[0] else None
-
-            try:
-                conn.execute(
-                    "INSERT OR REPLACE INTO monthly_revenue (symbol, year, month, revenue, yoy, mom) VALUES (?,?,?,?,?,?)",
-                    (symbol, year, month, rev, yoy, mom)
-                )
-                total += 1
-            except Exception:
-                pass
-
-        conn.commit()
-        print(f"  {year}/{month:02d}: {len(combined)} 檔", flush=True)
+        if yoy is not None or mom is not None:
+            conn.execute(
+                "UPDATE monthly_revenue SET yoy=?, mom=? WHERE symbol=? AND year=? AND month=?",
+                (yoy, mom, symbol, year, month)
+            )
+            updated += 1
+    conn.commit()
 
     log_sync(conn, "monthly_revenue", "success", total, started_at=started_at)
-    print(f"月營收同步完成，共 {total} 筆", flush=True)
+    print(f"月營收同步完成，共 {total} 筆（{updated} 筆有 YoY/MoM）", flush=True)
     return total
 
 

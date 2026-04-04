@@ -122,7 +122,12 @@ def train():
 
     X = combined[FEATURE_COLS].astype(float)
     X = X.replace([np.inf, -np.inf], np.nan)
-    # 用各特徵訓練集中位數填補 NaN（訓練時計算，預測時重用）
+    # 籌碼特徵 NaN 填 0（= 中性，因為籌碼資料覆蓋期短於價格資料）
+    CHIP_ZERO_COLS = ["foreign_net_60d", "trust_net_60d", "margin_balance_chg", "short_balance_chg"]
+    for col in CHIP_ZERO_COLS:
+        if col in X.columns:
+            X[col] = X[col].fillna(0)
+    # 其餘特徵用訓練集中位數填補 NaN（訓練時計算，預測時重用）
     feature_medians = X.median()
     X = X.fillna(feature_medians)
     y = combined["label"]
