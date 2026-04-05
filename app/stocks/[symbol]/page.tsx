@@ -19,12 +19,23 @@ interface StockDetail {
 
 const MA_COLORS: Record<number, string> = { 5: '#facc15', 10: '#f97316', 20: '#22d3ee', 60: '#a78bfa' }
 
+interface NewsItem { title: string; link: string; pubDate: string; source: string }
+
 export default function StockPage({ params }: { params: Promise<{ symbol: string }> }) {
   const { symbol } = use(params)
   const [data, setData] = useState<StockDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [visibleMA, setVisibleMA] = useState<Record<number, boolean>>({ 5: true, 10: true, 20: true, 60: true })
   const maSeriesRef = useRef<Record<number, ISeriesApi<'Line'>>>({})
+  const [news, setNews] = useState<NewsItem[]>([])
+
+  useEffect(() => {
+    if (!symbol) return
+    fetch(`/api/stocks/${encodeURIComponent(symbol)}/news`)
+      .then(r => r.json())
+      .then(d => setNews(d.items || []))
+      .catch(() => {})
+  }, [symbol])
 
   useEffect(() => {
     const encoded = encodeURIComponent(symbol)
@@ -111,6 +122,24 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
         <div className="bg-slate-800 rounded-xl p-4 mb-6">
           <h2 className="text-slate-300 text-sm font-medium mb-3">評分走勢</h2>
           <ScoreHistoryChart history={data.scoreHistory} />
+        </div>
+      )}
+
+      {/* 最新新聞 */}
+      {news.length > 0 && (
+        <div className="bg-slate-800 rounded-xl p-4 mb-6">
+          <h2 className="text-slate-300 text-sm font-medium mb-3">最新新聞</h2>
+          <ul className="space-y-2">
+            {news.map((n, i) => (
+              <li key={i} className="border-b border-slate-700/50 pb-2 last:border-0 last:pb-0">
+                <a href={n.link} target="_blank" rel="noopener noreferrer"
+                  className="text-slate-200 hover:text-white text-sm leading-snug block mb-0.5">
+                  {n.title}
+                </a>
+                <span className="text-slate-500 text-xs">{n.source} · {n.pubDate ? new Date(n.pubDate).toLocaleDateString('zh-TW') : ''}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

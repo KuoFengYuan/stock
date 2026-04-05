@@ -21,7 +21,18 @@ print(json.dumps(result))
 `
 
   return new Promise<NextResponse>((resolve) => {
-    const conda = '/opt/homebrew/Caskroom/miniconda/base/bin/conda'
+    const condaCandidates = [
+      process.env.CONDA_EXE,
+      '/opt/homebrew/Caskroom/miniconda/base/bin/conda',
+      '/usr/local/miniconda3/bin/conda',
+      `${process.env.HOME}/miniconda3/bin/conda`,
+      'C:\\Users\\Will\\miniconda3\\Scripts\\conda.exe',
+    ].filter(Boolean) as string[]
+
+    const fs = require('fs')
+    const conda = condaCandidates.find(p => { try { return fs.existsSync(p) } catch { return false } })
+      || 'conda'
+
     const cwd = path.join(process.cwd())
     const child = spawn(conda, ['run', '-n', 'stock', 'python3', '-c', script], { cwd })
 
