@@ -28,5 +28,9 @@ export async function GET(
     'SELECT date, foreign_net, trust_net, dealer_net, total_net FROM institutional WHERE symbol = ? ORDER BY date ASC'
   ).all(symbol) as { date: string; foreign_net: number; trust_net: number; dealer_net: number; total_net: number }[]
 
-  return NextResponse.json({ ...stock, prices, financials, institutional })
+  const scoreHistory = db.prepare(
+    'SELECT date, score, signal FROM recommendations WHERE symbol = ? ORDER BY date ASC'
+  ).all(symbol) as { date: string; score: number; signal: string }[]
+
+  return NextResponse.json({ ...stock, prices, financials, institutional, scoreHistory })
 }

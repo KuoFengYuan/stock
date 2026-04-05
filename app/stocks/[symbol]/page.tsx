@@ -8,11 +8,13 @@ const CandleChart = dynamic(() => import('./CandleChart'), { ssr: false })
 
 interface PriceRow { date: string; open: number; high: number; low: number; close: number; volume: number }
 interface InstRow { date: string; foreign_net: number; trust_net: number; dealer_net: number; total_net: number }
+interface ScoreRow { date: string; score: number; signal: string }
 interface StockDetail {
   symbol: string; name: string; market: string; industry?: string
   prices: PriceRow[]
   financials: { year: number; quarter: number; revenue?: number; net_income?: number; eps?: number }[]
   institutional: InstRow[]
+  scoreHistory: ScoreRow[]
 }
 
 const MA_COLORS: Record<number, string> = { 5: '#facc15', 10: '#f97316', 20: '#22d3ee', 60: '#a78bfa' }
@@ -104,6 +106,14 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
         </div>
       )}
 
+      {/* 分數走勢 */}
+      {data.scoreHistory && data.scoreHistory.length > 0 && (
+        <div className="bg-slate-800 rounded-xl p-4 mb-6">
+          <h2 className="text-slate-300 text-sm font-medium mb-3">評分走勢</h2>
+          <ScoreHistoryChart history={data.scoreHistory} />
+        </div>
+      )}
+
       {/* 財務資料 */}
       {data.financials.length > 0 && (
         <div className="bg-slate-800 rounded-xl p-4">
@@ -136,6 +146,60 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
           </table>
         </div>
       )}
+    </div>
+  )
+}
+
+const SIGNAL_COLOR: Record<string, string> = {
+  buy: '#22c55e',
+  watch: '#eab308',
+  neutral: '#64748b',
+}
+
+function ScoreHistoryChart({ history }: { history: ScoreRow[] }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!containerRef.current || history.length === 0) return
+    // dynamic import to avoid SSR
+    let chart: import('lightweight-charts').IChartApi | null = null
+    import('lightweight-charts').then(({ createChart, ColorType, LineSeries }) => {
+      if (!containerRef.current) return
+      chart = createChart(containerRef.current, {
+        layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#94a3b8' },
+        grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
+        rightPriceScale: { borderColor: '#334155' },
+        timeScale: { borderColor: '#334155', timeVisible: true },
+        height: 160,
+      })
+
+      const series = chart.addSeries(LineSeries, {
+        color: '#818cf8',
+        lineWidth: 2,
+        priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+        crosshairMarkerVisible: true,
+      })
+
+      series.setData(
+        history.map(h => ({ time: h.date as import('lightweight-charts').Time, value: Math.round(h.score * 100) / 100 }))
+      )
+
+      chart.timeScale().fitContent()
+    })
+    return () => { chart?.remove() }
+  }, [history])
+
+  return (
+    <div>
+      <div ref={containerRef} />
+      <div className="flex gap-3 mt-2">
+        {Object.entries({ buy: '買入', watch: '觀察', neutral: '中立' }).map(([sig, label]) => (
+          <span key={sig} className="flex items-center gap-1 text-[11px] text-slate-400">
+            <span className="inline-block w-2 h-2 rounded-full" style={{ background: SIGNAL_COLOR[sig] }} />
+            {label}
+          </span>
+        ))}
+      </div>
     </div>
   )
 }

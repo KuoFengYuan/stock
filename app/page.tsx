@@ -201,6 +201,12 @@ export default function HomePage() {
 
 function RecommendationTable({ items }: { items: RecommendationItem[] }) {
   const [signalFilter, setSignalFilter] = useState<'all' | 'buy' | 'watch' | 'neutral'>('all')
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
+
+  // 收集所有 sub_tag（有 AI tag 的）
+  const allSubTags = Array.from(new Set(
+    items.flatMap(i => i.tags?.filter(t => t.tag === 'AI' && t.sub_tag).map(t => t.sub_tag!) ?? [])
+  )).sort()
 
   // AI 概念股排前面（同 signal 內 AI 優先，再依 score 排序）
   const sorted = [...items].sort((a, b) => {
@@ -209,7 +215,11 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
     if (bAI !== aAI) return bAI - aAI
     return b.score - a.score
   })
-  const filtered = signalFilter === 'all' ? sorted : sorted.filter(i => i.signal === signalFilter)
+
+  let filtered = signalFilter === 'all' ? sorted : sorted.filter(i => i.signal === signalFilter)
+  if (tagFilter) {
+    filtered = filtered.filter(i => i.tags?.some(t => t.tag === 'AI' && t.sub_tag === tagFilter))
+  }
 
   const counts = {
     all: items.length,
@@ -227,7 +237,7 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
 
   return (
     <div>
-      <div className="flex gap-2 mb-4">
+      <div className="flex gap-2 mb-3">
         {filterBtns.map(btn => (
           <button
             key={btn.key}
@@ -242,6 +252,33 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
           </button>
         ))}
       </div>
+      {allSubTags.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-4 pb-3 border-b border-slate-800">
+          <button
+            onClick={() => setTagFilter(null)}
+            className={`text-[11px] px-2.5 py-1 rounded-full transition-colors ${
+              tagFilter === null
+                ? 'bg-violet-700 text-white'
+                : 'bg-slate-800 text-violet-400/70 hover:bg-slate-700'
+            }`}
+          >
+            AI 全部
+          </button>
+          {allSubTags.map(sub => (
+            <button
+              key={sub}
+              onClick={() => setTagFilter(tagFilter === sub ? null : sub)}
+              className={`text-[11px] px-2.5 py-1 rounded-full transition-colors ${
+                tagFilter === sub
+                  ? 'bg-violet-700 text-white'
+                  : 'bg-slate-800 text-violet-400/70 hover:bg-slate-700'
+              }`}
+            >
+              {sub}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
