@@ -8,13 +8,11 @@ const CandleChart = dynamic(() => import('./CandleChart'), { ssr: false })
 
 interface PriceRow { date: string; open: number; high: number; low: number; close: number; volume: number }
 interface InstRow { date: string; foreign_net: number; trust_net: number; dealer_net: number; total_net: number }
-interface ScoreRow { date: string; score: number; signal: string }
 interface StockDetail {
   symbol: string; name: string; market: string; industry?: string
   prices: PriceRow[]
   financials: { year: number; quarter: number; revenue?: number; net_income?: number; eps?: number }[]
   institutional: InstRow[]
-  scoreHistory: ScoreRow[]
 }
 
 const MA_COLORS: Record<number, string> = { 5: '#facc15', 10: '#f97316', 20: '#22d3ee', 60: '#a78bfa' }
@@ -60,13 +58,13 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
   const changePct = prev ? ((latest.close - prev.close) / prev.close) * 100 : 0
 
   return (
-    <div className="max-w-5xl">
+    <div className="max-w-7xl">
       <div className="mb-4">
         <a href="/" className="text-slate-400 hover:text-slate-200 text-sm">← 返回推薦清單</a>
       </div>
 
       {/* 標題 */}
-      <div className="flex items-start gap-4 mb-6">
+      <div className="flex items-start gap-4 mb-4">
         <div className="flex-1 min-w-0">
           <h1 className="text-xl sm:text-2xl font-bold text-white">{displaySymbol} {data.name}</h1>
           <div className="flex gap-3 mt-1 flex-wrap">
@@ -86,67 +84,44 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
         )}
       </div>
 
-      {/* 圖表 */}
-      {data.prices.length > 0 && (
-        <div className="bg-slate-800 rounded-xl p-4 mb-6">
-          {/* MA 按鈕 */}
-          <div className="flex items-center gap-3 mb-3">
-            <span className="text-slate-400 text-xs">均線</span>
-            {([5, 10, 20, 60] as const).map(p => (
-              <button
-                key={p}
-                onClick={() => toggleMA(p)}
-                className="text-xs px-2 py-0.5 rounded border transition-opacity"
-                style={{
-                  borderColor: MA_COLORS[p],
-                  color: MA_COLORS[p],
-                  opacity: visibleMA[p] ? 1 : 0.3,
-                }}
-              >
-                MA{p}
-              </button>
-            ))}
-          </div>
+      {/* 主體：桌面左右分欄，手機上下 */}
+      <div className="flex flex-col lg:flex-row gap-4">
 
-          <CandleChart
-            prices={data.prices}
-            institutional={data.institutional}
-            visibleMA={visibleMA}
-            onMaSeriesReady={refs => { maSeriesRef.current = refs }}
-          />
-        </div>
-      )}
+        {/* 左欄：圖表 + 分數 + 財務 */}
+        <div className="flex-1 min-w-0">
+          {/* 圖表 */}
+          {data.prices.length > 0 && (
+            <div className="bg-slate-800 rounded-xl p-4 mb-4">
+              <div className="flex items-center gap-3 mb-3">
+                <span className="text-slate-400 text-xs">均線</span>
+                {([5, 10, 20, 60] as const).map(p => (
+                  <button
+                    key={p}
+                    onClick={() => toggleMA(p)}
+                    className="text-xs px-2 py-0.5 rounded border transition-opacity"
+                    style={{
+                      borderColor: MA_COLORS[p],
+                      color: MA_COLORS[p],
+                      opacity: visibleMA[p] ? 1 : 0.3,
+                    }}
+                  >
+                    MA{p}
+                  </button>
+                ))}
+              </div>
+              <CandleChart
+                prices={data.prices}
+                institutional={data.institutional}
+                visibleMA={visibleMA}
+                onMaSeriesReady={refs => { maSeriesRef.current = refs }}
+              />
+            </div>
+          )}
 
-      {/* 分數走勢 */}
-      {data.scoreHistory && data.scoreHistory.length > 0 && (
-        <div className="bg-slate-800 rounded-xl p-4 mb-6">
-          <h2 className="text-slate-300 text-sm font-medium mb-3">評分走勢</h2>
-          <ScoreHistoryChart history={data.scoreHistory} />
-        </div>
-      )}
-
-      {/* 最新新聞 */}
-      {news.length > 0 && (
-        <div className="bg-slate-800 rounded-xl p-4 mb-6">
-          <h2 className="text-slate-300 text-sm font-medium mb-3">最新新聞</h2>
-          <ul className="space-y-2">
-            {news.map((n, i) => (
-              <li key={i} className="border-b border-slate-700/50 pb-2 last:border-0 last:pb-0">
-                <a href={n.link} target="_blank" rel="noopener noreferrer"
-                  className="text-slate-200 hover:text-white text-sm leading-snug block mb-0.5">
-                  {n.title}
-                </a>
-                <span className="text-slate-500 text-xs">{n.source} · {n.pubDate ? new Date(n.pubDate).toLocaleDateString('zh-TW') : ''}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* 財務資料 */}
-      {data.financials.length > 0 && (
-        <div className="bg-slate-800 rounded-xl p-4">
-          <h2 className="text-slate-300 text-sm font-medium mb-3">季度財務資料</h2>
+          {/* 財務資料 */}
+          {data.financials.length > 0 && (
+            <div className="bg-slate-800 rounded-xl p-4 mb-4 lg:mb-0">
+              <h2 className="text-slate-300 text-sm font-medium mb-3">季度財務資料</h2>
           <table className="w-full text-sm">
             <thead>
               <tr className="text-slate-400 border-b border-slate-700">
@@ -173,61 +148,31 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
               ))}
             </tbody>
           </table>
+            </div>
+          )}
         </div>
-      )}
-    </div>
-  )
-}
 
-const SIGNAL_COLOR: Record<string, string> = {
-  buy: '#22c55e',
-  watch: '#eab308',
-  neutral: '#64748b',
-}
-
-function ScoreHistoryChart({ history }: { history: ScoreRow[] }) {
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!containerRef.current || history.length === 0) return
-    // dynamic import to avoid SSR
-    let chart: import('lightweight-charts').IChartApi | null = null
-    import('lightweight-charts').then(({ createChart, ColorType, LineSeries }) => {
-      if (!containerRef.current) return
-      chart = createChart(containerRef.current, {
-        layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#94a3b8' },
-        grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
-        rightPriceScale: { borderColor: '#334155' },
-        timeScale: { borderColor: '#334155', timeVisible: true },
-        height: 160,
-      })
-
-      const series = chart.addSeries(LineSeries, {
-        color: '#818cf8',
-        lineWidth: 2,
-        priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
-        crosshairMarkerVisible: true,
-      })
-
-      series.setData(
-        history.map(h => ({ time: h.date as import('lightweight-charts').Time, value: Math.round(h.score * 100) / 100 }))
-      )
-
-      chart.timeScale().fitContent()
-    })
-    return () => { chart?.remove() }
-  }, [history])
-
-  return (
-    <div>
-      <div ref={containerRef} />
-      <div className="flex gap-3 mt-2">
-        {Object.entries({ buy: '買入', watch: '觀察', neutral: '中立' }).map(([sig, label]) => (
-          <span key={sig} className="flex items-center gap-1 text-[11px] text-slate-400">
-            <span className="inline-block w-2 h-2 rounded-full" style={{ background: SIGNAL_COLOR[sig] }} />
-            {label}
-          </span>
-        ))}
+        {/* 右欄：新聞 */}
+        {news.length > 0 && (
+          <div className="lg:w-72 xl:w-80 shrink-0">
+            <div className="bg-slate-800 rounded-xl p-4 lg:sticky lg:top-4">
+              <h2 className="text-slate-300 text-sm font-medium mb-3">最新新聞</h2>
+              <ul className="space-y-3">
+                {news.map((n, i) => (
+                  <li key={i} className="border-b border-slate-700/50 pb-3 last:border-0 last:pb-0">
+                    <a href={n.link} target="_blank" rel="noopener noreferrer"
+                      className="text-slate-200 hover:text-white text-sm leading-snug block mb-1">
+                      {n.title}
+                    </a>
+                    <span className="text-slate-500 text-xs">
+                      {n.source} · {n.pubDate ? new Date(n.pubDate).toLocaleDateString('zh-TW') : ''}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
