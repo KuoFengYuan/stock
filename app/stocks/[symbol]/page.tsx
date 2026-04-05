@@ -56,9 +56,9 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
 
       {/* 標題 */}
       <div className="flex items-start gap-4 mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-white">{displaySymbol} {data.name}</h1>
-          <div className="flex gap-3 mt-1">
+        <div className="flex-1 min-w-0">
+          <h1 className="text-xl sm:text-2xl font-bold text-white">{displaySymbol} {data.name}</h1>
+          <div className="flex gap-3 mt-1 flex-wrap">
             <span className={`text-xs px-2 py-0.5 rounded ${data.market === 'TSE' ? 'bg-blue-900/50 text-blue-300' : 'bg-purple-900/50 text-purple-300'}`}>
               {data.market === 'TSE' ? '上市' : '上櫃'}
             </span>
@@ -66,9 +66,9 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
           </div>
         </div>
         {latest && (
-          <div className="ml-auto text-right">
-            <div className="text-3xl font-mono font-bold text-white">{latest.close.toFixed(2)}</div>
-            <div className={`text-sm font-mono ${changePct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+          <div className="text-right shrink-0">
+            <div className="text-2xl sm:text-3xl font-mono font-bold text-white">{latest.close.toFixed(2)}</div>
+            <div className={`text-sm font-mono ${changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
               {changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%
             </div>
           </div>

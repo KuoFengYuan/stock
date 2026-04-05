@@ -220,20 +220,24 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
         <div ref={priceRef} className="w-full" />
         {priceTooltip && (
           <div
-            className="absolute top-1 left-2 pointer-events-none px-2 py-1 rounded text-xs whitespace-nowrap z-10 flex items-center gap-2"
-            style={{ background: 'rgba(15,23,42,0.85)', border: '1px solid #334155' }}
+            className="absolute top-1 left-1 pointer-events-none px-2 py-1 rounded text-xs z-10"
+            style={{ background: 'rgba(15,23,42,0.90)', border: '1px solid #334155', maxWidth: 'calc(100% - 8px)' }}
           >
-            <span className="text-slate-500">{priceTooltip.date}</span>
-            <span className="text-slate-500">開</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.open.toFixed(2)}</span>
-            <span className="text-slate-500">高</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.high.toFixed(2)}</span>
-            <span className="text-slate-500">低</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.low.toFixed(2)}</span>
-            <span className="text-slate-500">收</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.close.toFixed(2)}</span>
-            {priceTooltip.changePct != null && (
-              <span style={{ color: priceTooltip.changePct >= 0 ? '#ef4444' : '#22c55e' }}>
-                {priceTooltip.changePct >= 0 ? '+' : ''}{priceTooltip.changePct.toFixed(2)}%
-              </span>
-            )}
-            <span className="text-slate-500">量</span><span className="text-slate-400">{priceTooltip.volume.toLocaleString()}</span>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <span className="text-slate-500">{priceTooltip.date}</span>
+              {priceTooltip.changePct != null && (
+                <span style={{ color: priceTooltip.changePct >= 0 ? '#ef4444' : '#22c55e' }}>
+                  {priceTooltip.changePct >= 0 ? '+' : ''}{priceTooltip.changePct.toFixed(2)}%
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
+              <span className="text-slate-500">開</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.open.toFixed(2)}</span>
+              <span className="text-slate-500">高</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.high.toFixed(2)}</span>
+              <span className="text-slate-500">低</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.low.toFixed(2)}</span>
+              <span className="text-slate-500">收</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.close.toFixed(2)}</span>
+              <span className="text-slate-500">量</span><span className="text-slate-400">{priceTooltip.volume.toLocaleString()}</span>
+            </div>
           </div>
         )}
       </div>

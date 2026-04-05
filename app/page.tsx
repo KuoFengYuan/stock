@@ -2,6 +2,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { RecommendationItem } from '@/types/stock'
 
+const SCROLL_KEY = 'home_scroll'
+
 function useTimer(running: boolean) {
   const [elapsed, setElapsed] = useState(0)
   const startRef = useRef<number | null>(null)
@@ -52,7 +54,15 @@ export default function HomePage() {
     }
   }, [])
 
-  useEffect(() => { fetchRecommendations() }, [fetchRecommendations])
+  useEffect(() => {
+    fetchRecommendations().then(() => {
+      const saved = sessionStorage.getItem(SCROLL_KEY)
+      if (saved) {
+        requestAnimationFrame(() => { window.scrollTo(0, parseInt(saved)) })
+        sessionStorage.removeItem(SCROLL_KEY)
+      }
+    })
+  }, [fetchRecommendations])
 
   async function handleSync() {
     setSyncing(true)
@@ -124,17 +134,17 @@ export default function HomePage() {
 
   return (
     <div>
-      <div className="flex items-start justify-between mb-6 gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between mb-6 gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">今日推薦清單</h1>
           {data?.date && <p className="text-slate-400 text-sm mt-1">資料日期：{data.date}　共 {data.items.length} 檔</p>}
         </div>
-        <div className="flex flex-col items-end gap-2">
-          <div className="flex gap-2">
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap gap-2">
             <button
               onClick={handleSync}
               disabled={syncing || analyzing}
-              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-lg transition-colors min-w-28"
+              className="flex-1 sm:flex-none px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-lg transition-colors min-w-24"
             >
               {syncing ? `同步中… ${formatElapsed(syncElapsed)}` : '同步資料'}
             </button>
@@ -142,14 +152,14 @@ export default function HomePage() {
             <button
               onClick={() => handleAnalyze('rule')}
               disabled={syncing || analyzing}
-              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-lg transition-colors min-w-28"
+              className="flex-1 sm:flex-none px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-lg transition-colors min-w-24"
             >
               {analyzing ? `分析中… ${formatElapsed(analyzeElapsed)}` : '規則分析'}
             </button>
             <button
               onClick={() => handleAnalyze('ml')}
               disabled={syncing || analyzing}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded-lg transition-colors min-w-28"
+              className="flex-1 sm:flex-none px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded-lg transition-colors min-w-24"
             >
               {analyzing ? `分析中… ${formatElapsed(analyzeElapsed)}` : 'AI 分析'}
             </button>
@@ -288,7 +298,58 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
           ))}
         </div>
       )}
-      <div className="overflow-x-auto">
+      {/* 手機版 card 列表 */}
+      <div className="sm:hidden flex flex-col gap-2">
+        {filtered.map((item) => (
+          <a key={item.symbol} href={`/stocks/${item.symbol}`} onClick={() => sessionStorage.setItem(SCROLL_KEY, String(window.scrollY))} className="block bg-slate-800/60 rounded-xl p-3 active:bg-slate-700/60">
+            <div className="flex items-start justify-between gap-2 mb-2">
+              <div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-blue-400 font-medium">{item.symbol.replace('.TW', '').replace('.TWO', '')}</span>
+                  <span className="text-slate-400 text-xs">{item.name}</span>
+                  {item.tags?.some(t => t.tag === 'AI') && (
+                    <span className="text-[10px] px-1.5 rounded bg-violet-900/60 text-violet-300 border border-violet-700/60">AI</span>
+                  )}
+                </div>
+                {item.tags?.some(t => t.tag === 'AI') && (
+                  <div className="flex flex-wrap gap-1 mt-0.5">
+                    {[...new Set(item.tags.filter(t => t.tag === 'AI' && t.sub_tag).map(t => t.sub_tag))].map((sub, i) => (
+                      <span key={i} className="text-[10px] px-1.5 rounded bg-slate-700 text-violet-400/80">{sub}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="text-right shrink-0">
+                <div className="font-mono text-white">{item.close?.toFixed(2) ?? '-'}</div>
+                <div className={`text-xs font-mono ${item.changePct == null ? 'text-slate-500' : item.changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                  {item.changePct != null ? `${item.changePct >= 0 ? '+' : ''}${item.changePct.toFixed(2)}%` : '-'}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 mb-2">
+              <SignalBadge signal={item.signal} />
+              <ScoreBar score={item.score} />
+              <span className="text-xs text-slate-500 ml-auto">{item.volume ? item.volume.toLocaleString() + '張' : ''}</span>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {item.reasons.map((r, i) => {
+                const isWarn = r.startsWith('⚠')
+                const isDiverg = r.includes('買超／') || r.includes('賣超／')
+                return (
+                  <span key={i} className={`text-[11px] px-1.5 py-0.5 rounded ${
+                    isWarn ? 'bg-red-900/50 text-red-300 border border-red-800/60'
+                    : isDiverg ? 'bg-yellow-900/40 text-yellow-300 border border-yellow-700/50'
+                    : 'bg-slate-700/80 text-slate-300'
+                  }`}>{r}</span>
+                )
+              })}
+            </div>
+          </a>
+        ))}
+      </div>
+
+      {/* 桌面版表格 */}
+      <div className="hidden sm:block overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="text-slate-400 border-b border-slate-700">
@@ -307,7 +368,7 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
             <tr key={item.symbol} className="border-b border-slate-800 hover:bg-slate-800/50 transition-colors">
               <td className="py-3 px-3">
                 <div className="flex items-center gap-1.5 whitespace-nowrap">
-                  <a href={`/stocks/${item.symbol}`} className="text-blue-400 hover:text-blue-300 font-medium">
+                  <a href={`/stocks/${item.symbol}`} onClick={() => sessionStorage.setItem(SCROLL_KEY, String(window.scrollY))} className="text-blue-400 hover:text-blue-300 font-medium">
                     {item.symbol.replace('.TW', '').replace('.TWO', '')}
                   </a>
                   <span className="text-slate-400 text-xs">{item.name}</span>
@@ -329,7 +390,7 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
                 </span>
               </td>
               <td className="py-3 px-3 text-right font-mono whitespace-nowrap">{item.close?.toFixed(2) ?? '-'}</td>
-              <td className={`py-3 px-3 text-right font-mono whitespace-nowrap ${item.changePct == null ? 'text-slate-500' : item.changePct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              <td className={`py-3 px-3 text-right font-mono whitespace-nowrap ${item.changePct == null ? 'text-slate-500' : item.changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
                 {item.changePct != null ? `${item.changePct >= 0 ? '+' : ''}${item.changePct.toFixed(2)}%` : '-'}
               </td>
               <td className="py-3 px-3 text-right font-mono whitespace-nowrap text-slate-300">
