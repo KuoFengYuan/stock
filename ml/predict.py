@@ -154,26 +154,32 @@ def run_predict():
             # 混合評分
             final_score = ml_score * ml_weight + rule_score * rule_weight
 
-            # 規則引擎 neutral → 不論 ML 分數多高都不推薦
-            if rule_signal == "neutral":
-                signal = "neutral"
-                final_score = min(final_score, 0.45)
-            else:
-                # 動態門檻（與 apply_rules 相同邏輯）
-                buy_thresh   = 0.56 + (market_win_rate - 0.50) * 0.30
-                watch_thresh = 0.50 + (market_win_rate - 0.50) * 0.30
-                if market_win_rate < 0.42:
-                    buy_thresh   = max(buy_thresh, 0.58)
-                    watch_thresh = max(watch_thresh, 0.52)
-                buy_thresh   = max(0.52, min(buy_thresh,   0.65))
-                watch_thresh = max(0.46, min(watch_thresh, 0.58))
+            # 動態門檻
+            buy_thresh   = 0.56 + (market_win_rate - 0.50) * 0.30
+            watch_thresh = 0.50 + (market_win_rate - 0.50) * 0.30
+            if market_win_rate < 0.42:
+                buy_thresh   = max(buy_thresh, 0.58)
+                watch_thresh = max(watch_thresh, 0.52)
+            buy_thresh   = max(0.52, min(buy_thresh,   0.65))
+            watch_thresh = max(0.46, min(watch_thresh, 0.58))
 
-                if final_score >= buy_thresh:
-                    signal = "buy"
-                elif final_score >= watch_thresh:
+            # 規則引擎硬性排除（無 reasons = 真 neutral）→ ML 無法救
+            # 有 reasons 的 neutral（被風險扣分壓低）→ ML 有機會拉回到 watch
+            if rule_signal == "neutral" and not reasons:
+                signal = "neutral"
+                final_score = min(final_score, 0.30)
+            elif rule_signal == "neutral" and reasons:
+                # 有基本面但被扣分壓低，ML 最多拉到 watch（不給 buy）
+                if final_score >= watch_thresh:
                     signal = "watch"
                 else:
                     signal = "neutral"
+            elif final_score >= buy_thresh:
+                signal = "buy"
+            elif final_score >= watch_thresh:
+                signal = "watch"
+            else:
+                signal = "neutral"
 
             features_json = json.dumps({
                 col: (float(X[col].iloc[0]) if not pd.isna(X[col].iloc[0]) else None)

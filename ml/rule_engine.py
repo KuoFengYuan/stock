@@ -291,41 +291,39 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     """
     中長期選股邏輯。
 
-    評分架構（修正版）：
-    - base = 底分（市場基準 0.38~0.48）
-    - + 基本面超額勝率，遞減加成（最強100% -> 第二40% -> 第三20% -> 之後10%）
-    - x 估值乘數 x 月營收乘數 x 籌碼乘數
-    - + 技術面微調 +/-0.04
+    評分架構（v5 加減分制）：
+    - score = 0.40（底分）
+    - + 基本面加分（ROE/營收/獲利/Piotroski，遞減加成）
+    - + 估值加減分（PE/PB/PEG/殖利率）
+    - + 月營收加分
+    - + 籌碼加減分（法人買賣超，警告不重扣）
+    - + 技術面加減分（趨勢/RSI/回調）
     - 動態門檻依大盤環境調整
     """
     reasons = []
     has_fundamental = False
 
-    # == 前置過濾 ==
+    # == 前置過濾（硬性排除）==
     high_1y = tech.get("high_1y")
     if high_1y is not None and high_1y > 0 and close > 0:
         drawdown = (close - high_1y) / high_1y
         if drawdown < -0.6:
-            return [f"⚠ 近一年跌幅 {drawdown*100:.0f}%"], "neutral", 0.3
+            return [f"⚠ 近一年跌幅 {drawdown*100:.0f}%"], "neutral", 0.20
 
-    # TTM 淨利為負（ROE < 0 或 ni_ttm < 0）-> 持續虧損，直接不推薦
     roe_check = fund.get("roe")
     ni_ttm_check = fund.get("ni_ttm")
     if roe_check is not None and roe_check < 0:
-        return [], "neutral", 0.3
+        return [], "neutral", 0.20
     if ni_ttm_check is not None and ni_ttm_check < 0:
-        return [], "neutral", 0.3
+        return [], "neutral", 0.20
 
     _pe_early = fund.get("pe_ratio")
     if _pe_early is not None and _pe_early > 60:
-        return [f"⚠ PE {_pe_early:.0f} 過高，估值極度偏貴"], "neutral", 0.3
+        return [f"⚠ PE {_pe_early:.0f} 過高"], "neutral", 0.20
 
-    _r20 = tech.get("return20d")
+    # == 第一層：基本面品質 → 加分 ==
+    score = 0.40  # 底分
 
-    # == 第一層：基本面品質 -> 遞減加成 ==
-    base_floor = max(0.38, min(_BACKTEST_MKT_WIN_RATE, 0.48))
-
-    # 收集觸發的基本面訊號及其超額勝率
     fund_signals: list[tuple[str, float]] = []
 
     roe = fund.get("roe")
@@ -356,7 +354,6 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     if debt_ratio is not None and debt_ratio < 50:
         fund_signals.append(("debt_low", _excess_win("debt_low", 0.02)))
 
-    # Piotroski F-Score（品質因子）
     if piotroski:
         f_score = piotroski.get("piotroski", 0)
         if f_score >= 5:
@@ -367,96 +364,88 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
             reasons.append(f"Piotroski {f_score}/6")
             fund_signals.append(("piotroski_ok", _excess_win("piotroski_ok", 0.03)))
         elif f_score <= 1:
-            # 品質極差，直接不推薦
-            return [f"⚠ Piotroski {f_score}/6 品質極差"], "neutral", 0.3
+            return [f"⚠ Piotroski {f_score}/6 品質極差"], "neutral", 0.20
 
     if not has_fundamental:
-        return [], "neutral", 0.3
+        return [], "neutral", 0.20
 
-    # 遞減加成：最強訊號 100%，第二 40%，第三 20%，之後 10%
+    # 遞減加成
     fund_signals.sort(key=lambda x: x[1], reverse=True)
-    decay_weights = [1.0, 0.4, 0.2, 0.1, 0.1]
-    fund_bonus = 0.0
+    decay_weights = [1.0, 0.5, 0.3, 0.15, 0.1]
     for i, (rule_name, excess) in enumerate(fund_signals):
         if rule_name in _SUPPRESSED_RULES:
             continue
         w = decay_weights[i] if i < len(decay_weights) else 0.1
-        fund_bonus += excess * w
+        score += excess * w
 
-    base_score = base_floor + fund_bonus
-    base_score = min(base_score, 0.58)  # 純基本面上限，留空間給乘數
-
-    # == 第二層：估值乘數 ==
+    # == 第二層：估值加減分 ==
     pe = fund.get("pe_ratio")
     pb = fund.get("pb_ratio")
-    val_mult = 1.0
 
     if pe is not None:
         if pe > 40:
-            val_mult *= 0.75
+            score -= 0.06
         elif pe > 30:
-            val_mult *= 0.85
+            score -= 0.03
         elif pe < 15:
             reasons.append(f"低本益比 PE {pe:.0f}")
-            val_mult *= 1.10
+            score += 0.04
         elif pe <= 25:
             reasons.append(f"PE {pe:.0f}")
-            val_mult *= 1.03
+            score += 0.02
 
     if pb is not None:
         if pb < 2:
             reasons.append(f"PB {pb:.1f}")
-            val_mult *= 1.05
+            score += 0.02
         elif pb > 4:
-            val_mult *= 0.90
+            score -= 0.02
 
-    # PEG Ratio（Peter Lynch）
     if peg_data:
         peg = peg_data.get("peg")
         eps_g = peg_data.get("eps_growth")
         if peg is not None and eps_g is not None and eps_g >= 10:
             if peg < 1.0:
                 reasons.append(f"PEG {peg:.1f}（成長價值）")
-                val_mult *= 1.10
+                score += 0.04
             elif peg < 1.5:
                 reasons.append(f"PEG {peg:.1f}")
-                val_mult *= 1.05
+                score += 0.02
             elif peg > 2.5:
-                val_mult *= 0.90
+                score -= 0.02
 
-    # 殖利率（高殖利率 = 台股核心價值因子）
     div_yield = fund.get("div_yield")
     if div_yield is not None:
         if div_yield >= 6:
             reasons.append(f"高殖利率 {div_yield:.1f}%")
-            val_mult *= 1.08
+            score += 0.03
         elif div_yield >= 4:
             reasons.append(f"殖利率 {div_yield:.1f}%")
-            val_mult *= 1.04
+            score += 0.02
 
-    # 產業相對估值（同產業 PE 中位數比較）
     if pe is not None and industry_median_pe is not None and industry_median_pe > 0:
         pe_relative = pe / industry_median_pe
         if pe_relative < 0.7:
             reasons.append(f"產業低估 PE={pe:.0f} (同業中位 {industry_median_pe:.0f})")
-            val_mult *= 1.06
+            score += 0.03
         elif pe_relative > 1.5:
             reasons.append(f"⚠ 產業高估 PE={pe:.0f} (同業中位 {industry_median_pe:.0f})")
-            val_mult *= 0.92
+            score -= 0.03
 
-    # 短期漲幅過大懲罰
+    # 追高風險：標警告 + 輕扣分（不再重扣）
+    _r20 = tech.get("return20d")
     if _r20 is not None:
-        if _r20 > 20:
+        if _r20 > 30:
             reasons.append(f"⚠ 追高風險：近20日漲 {_r20:.0f}%")
-            val_mult *= 0.82
+            score -= 0.04
+        elif _r20 > 20:
+            reasons.append(f"⚠ 追高風險：近20日漲 {_r20:.0f}%")
+            score -= 0.03
         elif _r20 > 15:
-            reasons.append(f"⚠ 追高風險：近20日漲 {_r20:.0f}%")
-            val_mult *= 0.90
+            reasons.append(f"⚠ 短期偏熱：近20日漲 {_r20:.0f}%")
+            score -= 0.01
 
-    val_mult = max(0.70, min(val_mult, 1.15))
-
-    # == 第三層：月營收乘數（使用固定乘數，不從 rule_scores 讀取）==
-    rev_mult = 1.0
+    # == 第三層：月營收加分 ==
     if monthly:
         consecutive_yoy = monthly.get("rev_consecutive_yoy", 0)
         consecutive_mom = monthly.get("rev_consecutive_mom", 0)
@@ -464,44 +453,40 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
 
         if consecutive_yoy >= 6:
             reasons.append(f"月營收年增連 {consecutive_yoy} 個月")
-            rev_mult = 1.12
+            score += 0.05
             has_fundamental = True
             if consecutive_mom >= 3:
                 reasons.append(f"月營收月增連 {consecutive_mom} 個月")
             if rev_accel:
                 reasons.append("月營收成長加速")
-                rev_mult = 1.15
+                score += 0.02
         elif consecutive_yoy >= 3:
             reasons.append(f"月營收年增連 {consecutive_yoy} 個月")
-            rev_mult = 1.07
+            score += 0.03
             has_fundamental = True
             if rev_accel:
                 reasons.append("月營收成長加速")
-                rev_mult = 1.10
+                score += 0.01
         elif consecutive_mom >= 3:
             reasons.append(f"月營收月增連 {consecutive_mom} 個月")
-            rev_mult = 1.04
+            score += 0.02
         elif rev_accel:
             reasons.append("月營收成長加速")
-            rev_mult = 1.03
+            score += 0.01
 
-    rev_mult = max(1.0, min(rev_mult, 1.15))
-
-    # == 第四層：籌碼乘數 ==
-    # DB 存的是「股」，500張 = 500,000股
+    # == 第四層：籌碼加減分（警告不重扣）==
     CHIP_MIN_ABS = 500_000  # 股（= 500 張）
     foreign_60d = tech.get("foreign_net_60d") or tech.get("foreign_net_20d")
     trust_60d   = tech.get("trust_net_60d")   or tech.get("trust_net_20d")
     foreign_10d = tech.get("foreign_net_10d")
     trust_10d   = tech.get("trust_net_10d")
 
-    chip_mult = 1.0
     if foreign_60d is not None and foreign_60d > CHIP_MIN_ABS:
         reasons.append(f"外資60日淨買 {foreign_60d/1000:,.0f}張")
-        chip_mult *= 1.05
+        score += 0.03
     if trust_60d is not None and trust_60d > CHIP_MIN_ABS:
         reasons.append(f"投信60日淨買 {trust_60d/1000:,.0f}張")
-        chip_mult *= 1.05
+        score += 0.03
 
     foreign_selling = foreign_10d is not None and foreign_10d < -CHIP_MIN_ABS
     foreign_buying  = foreign_10d is not None and foreign_10d > CHIP_MIN_ABS
@@ -509,7 +494,6 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     trust_buying    = trust_10d   is not None and trust_10d   > CHIP_MIN_ABS
     chip_warning    = foreign_selling and trust_selling
 
-    # 格式化張數顯示
     def _chip_str(val):
         v = abs(val) / 1000
         return f"{v:,.0f}張"
@@ -518,117 +502,100 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
         f, t = abs(foreign_10d), abs(trust_10d)
         if t > f * 3:
             reasons.append(f"⚠ 投信大賣 -{_chip_str(trust_10d)}／外資小買 +{_chip_str(foreign_10d)}（近10日）")
-            chip_mult *= 0.88
+            score -= 0.02
         else:
             reasons.append(f"外資買超 +{_chip_str(foreign_10d)}／投信賣超 -{_chip_str(trust_10d)}（近10日）")
     elif foreign_selling and trust_buying:
         f, t = abs(foreign_10d), abs(trust_10d)
         if f > t * 3:
             reasons.append(f"⚠ 外資大賣 -{_chip_str(foreign_10d)}／投信小買 +{_chip_str(trust_10d)}（近10日）")
-            chip_mult *= 0.88
+            score -= 0.02
         else:
             reasons.append(f"投信買超 +{_chip_str(trust_10d)}／外資賣超 -{_chip_str(foreign_10d)}（近10日）")
 
     if chip_warning:
         reasons.append(f"⚠ 法人近10日同步賣超（外資 -{_chip_str(foreign_10d)} 投信 -{_chip_str(trust_10d)}）")
-        chip_mult *= 0.82
+        score -= 0.03
 
-    # 自營商反指標（自營商大買常是偏空信號）
     dealer_10d = tech.get("dealer_net_10d")
     if dealer_10d is not None and abs(dealer_10d) > CHIP_MIN_ABS:
         if dealer_10d > CHIP_MIN_ABS * 5:
             reasons.append(f"⚠ 自營商大買 +{_chip_str(dealer_10d)}（近10日，反指標）")
-            chip_mult *= 0.95
-        elif dealer_10d < -CHIP_MIN_ABS * 5:
-            # 自營商大賣反而可能是正面（散戶指標相反）
-            chip_mult *= 1.02
+            score -= 0.01
 
-    # 融資增減（散戶指標）
     margin_chg = tech.get("margin_balance_chg_10d")
     short_balance = tech.get("short_balance")
     if margin_chg is not None:
         if margin_chg > 15:
             reasons.append(f"⚠ 融資大增 +{margin_chg:.0f}%（散戶追高）")
-            chip_mult *= 0.93
+            score -= 0.02
         elif margin_chg < -15:
             reasons.append(f"融資大減 {margin_chg:.0f}%（籌碼沉澱）")
-            chip_mult *= 1.03
+            score += 0.01
 
-    # 融券回補壓力
     if short_balance is not None and short_balance > 0:
         vol = tech.get("volume", 0)
         if vol > 0:
-            short_ratio = short_balance / vol  # 融券/日均量
+            short_ratio = short_balance / vol
             if short_ratio > 5:
                 reasons.append(f"融券/量比 {short_ratio:.1f} 天（軋空壓力）")
-                chip_mult *= 1.03
+                score += 0.01
 
-    chip_mult = max(0.75, min(chip_mult, 1.15))
-
-    # == 第五層：技術面（Minervini 趨勢 + RS 動量 + RSI）==
-    tech_adj = 0.0
+    # == 第五層：技術面加減分 ==
     rsi = tech.get("rsi14")
     return20d = tech.get("return20d")
 
-    # Minervini 趨勢模板（取代舊的 SMA60 判斷）
     if minervini:
         m_score = minervini.get("minervini", 0)
         if m_score >= 7:
             reasons.append(f"趨勢強勁 {m_score}/8 (Minervini)")
-            tech_adj += 0.03
+            score += 0.03
         elif m_score >= 5:
             reasons.append(f"趨勢健康 {m_score}/8")
-            tech_adj += 0.02
+            score += 0.02
         elif m_score <= 2:
-            tech_adj -= 0.02
+            score -= 0.02
     else:
-        # fallback: 舊的 SMA60 判斷
         sma60 = tech.get("sma60")
         if sma60 and close:
             if close >= sma60 * 0.95:
-                tech_adj += 0.01
+                score += 0.01
             else:
-                tech_adj -= 0.02
+                score -= 0.02
 
-    # 相對強度 RS percentile（CANSLIM / AQR 動量因子）
     if rs_pctile is not None:
         if rs_pctile >= 90:
             reasons.append(f"相對強度 RS {rs_pctile:.0f}%")
-            tech_adj += 0.03
+            score += 0.03
         elif rs_pctile >= 80:
             reasons.append(f"相對強度 RS {rs_pctile:.0f}%")
-            tech_adj += 0.02
+            score += 0.02
         elif rs_pctile <= 20:
-            tech_adj -= 0.02
+            score -= 0.02
 
-    # RSI
     if rsi is not None:
         if rsi < 35 and "rsi_oversold" not in _SUPPRESSED_RULES:
             reasons.append("RSI 低檔")
-            tech_adj += 0.01
+            score += 0.01
         elif rsi > 75:
-            tech_adj -= 0.01
+            score -= 0.01
 
     if return20d is not None and -10 < return20d < 0 and "pullback" not in _SUPPRESSED_RULES:
         reasons.append("近期回調")
-        tech_adj += 0.01
+        score += 0.01
 
-    # 量價背離
     vpd = tech.get("vol_price_divergence")
     if vpd == "bearish":
         reasons.append("⚠ 價漲量縮（量價背離）")
-        tech_adj -= 0.02
+        score -= 0.02
     elif vpd == "bullish":
         reasons.append("價跌量增（可能洗盤）")
-        tech_adj += 0.01
-
-    tech_adj = max(-0.06, min(tech_adj, 0.06))
+        score += 0.01
 
     # == 最終分數 ==
-    score = base_score * val_mult * rev_mult * chip_mult + tech_adj
     score = min(max(score, 0.0), 1.0)
 
-    # == 動態門檻：大盤擇時 ==
+    # == 動態門檻 ==
     buy_thresh   = 0.56 + (market_win_rate - 0.50) * 0.30
     watch_thresh = 0.50 + (market_win_rate - 0.50) * 0.30
     if market_win_rate < 0.42:
