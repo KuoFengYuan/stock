@@ -186,14 +186,14 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       })
     }
 
-    // 雙向同步時間軸：任一圖拖動，其他全部跟上
+    // 雙向同步時間軸（用實際時間範圍，不用 logical index 避免資料量不同錯位）
     let syncing = false
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     function syncFrom(source: IChartApi, targets: (IChartApi | null)[]) {
-      source.timeScale().subscribeVisibleLogicalRangeChange((range: any) => {
+      source.timeScale().subscribeVisibleTimeRangeChange((range: any) => {
         if (syncing || !range) return
         syncing = true
-        targets.forEach(t => t?.timeScale().setVisibleLogicalRange(range))
+        targets.forEach(t => t?.timeScale().setVisibleRange(range))
         syncing = false
       })
     }
