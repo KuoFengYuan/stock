@@ -186,14 +186,21 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       })
     }
 
-    // 同步時間軸（主圖驅動）
+    // 雙向同步時間軸：任一圖拖動，其他全部跟上
+    let syncing = false
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    priceChart.timeScale().subscribeVisibleTimeRangeChange((range: any) => {
-      if (!range) return
-      volChart.timeScale().setVisibleRange(range)
-      foreignChart?.timeScale().setVisibleRange(range)
-      trustChart?.timeScale().setVisibleRange(range)
-    })
+    function syncFrom(source: IChartApi, targets: (IChartApi | null)[]) {
+      source.timeScale().subscribeVisibleLogicalRangeChange((range: any) => {
+        if (syncing || !range) return
+        syncing = true
+        targets.forEach(t => t?.timeScale().setVisibleLogicalRange(range))
+        syncing = false
+      })
+    }
+    syncFrom(priceChart, [volChart, foreignChart, trustChart])
+    syncFrom(volChart, [priceChart, foreignChart, trustChart])
+    if (foreignChart) syncFrom(foreignChart, [priceChart, volChart, trustChart])
+    if (trustChart) syncFrom(trustChart, [priceChart, volChart, foreignChart])
 
     priceChart.timeScale().fitContent()
     allCharts.forEach(c => { if (c !== priceChart) c.timeScale().fitContent() })

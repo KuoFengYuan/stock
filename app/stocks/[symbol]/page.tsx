@@ -113,7 +113,7 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
         {/* 新聞 */}
         {news.length > 0 && (
           <div className="lg:w-72 xl:w-80 shrink-0">
-            <div className="bg-slate-800 rounded-xl p-4 lg:sticky lg:top-4 flex flex-col" style={{ maxHeight: '80vh' }}>
+            <div className="bg-slate-800 rounded-xl p-4 flex flex-col" style={{ maxHeight: '80vh' }}>
               <h2 className="text-slate-300 text-sm font-medium mb-3 shrink-0">最新新聞</h2>
               <ul className="space-y-3 overflow-y-auto pr-1">
                 {news.map((n, i) => (
