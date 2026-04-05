@@ -203,11 +203,6 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
   const [signalFilter, setSignalFilter] = useState<'all' | 'buy' | 'watch' | 'neutral'>('all')
   const [tagFilter, setTagFilter] = useState<string | null>(null)
 
-  // 收集所有 sub_tag（有 AI tag 的）
-  const allSubTags = Array.from(new Set(
-    items.flatMap(i => i.tags?.filter(t => t.tag === 'AI' && t.sub_tag).map(t => t.sub_tag!) ?? [])
-  )).sort()
-
   // AI 概念股排前面（同 signal 內 AI 優先，再依 score 排序）
   const sorted = [...items].sort((a, b) => {
     const aAI = a.tags?.some(t => t.tag === 'AI') ? 1 : 0
@@ -216,10 +211,20 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
     return b.score - a.score
   })
 
-  let filtered = signalFilter === 'all' ? sorted : sorted.filter(i => i.signal === signalFilter)
-  if (tagFilter) {
-    filtered = filtered.filter(i => i.tags?.some(t => t.tag === 'AI' && t.sub_tag === tagFilter))
+  const signalFiltered = signalFilter === 'all' ? sorted : sorted.filter(i => i.signal === signalFilter)
+
+  // 計算 signal filter 後每個 sub_tag 的命中數，依數量排序，0 筆隱藏
+  const subTagCounts = new Map<string, number>()
+  for (const item of signalFiltered) {
+    const subs = new Set(item.tags?.filter(t => t.tag === 'AI' && t.sub_tag).map(t => t.sub_tag!) ?? [])
+    for (const sub of subs) subTagCounts.set(sub, (subTagCounts.get(sub) ?? 0) + 1)
   }
+  const visibleSubTags = Array.from(subTagCounts.entries())
+    .filter(([, cnt]) => cnt > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([sub]) => sub)
+
+  let filtered = tagFilter ? signalFiltered.filter(i => i.tags?.some(t => t.tag === 'AI' && t.sub_tag === tagFilter)) : signalFiltered
 
   const counts = {
     all: items.length,
@@ -252,8 +257,9 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
           </button>
         ))}
       </div>
-      {allSubTags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mb-4 pb-3 border-b border-slate-800">
+      {visibleSubTags.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-4 pb-3 border-b border-slate-800 items-center">
+          <span className="text-[10px] text-slate-500 mr-1">AI 主題</span>
           <button
             onClick={() => setTagFilter(null)}
             className={`text-[11px] px-2.5 py-1 rounded-full transition-colors ${
@@ -262,19 +268,22 @@ function RecommendationTable({ items }: { items: RecommendationItem[] }) {
                 : 'bg-slate-800 text-violet-400/70 hover:bg-slate-700'
             }`}
           >
-            AI 全部
+            全部 {signalFiltered.filter(i => i.tags?.some(t => t.tag === 'AI')).length}
           </button>
-          {allSubTags.map(sub => (
+          {visibleSubTags.map(sub => (
             <button
               key={sub}
               onClick={() => setTagFilter(tagFilter === sub ? null : sub)}
-              className={`text-[11px] px-2.5 py-1 rounded-full transition-colors ${
+              className={`text-[11px] px-2.5 py-1 rounded-full transition-colors flex items-center gap-1 ${
                 tagFilter === sub
                   ? 'bg-violet-700 text-white'
                   : 'bg-slate-800 text-violet-400/70 hover:bg-slate-700'
               }`}
             >
               {sub}
+              <span className={`text-[10px] ${tagFilter === sub ? 'text-violet-200' : 'text-slate-500'}`}>
+                {subTagCounts.get(sub)}
+              </span>
             </button>
           ))}
         </div>
