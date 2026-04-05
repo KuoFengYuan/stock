@@ -58,7 +58,7 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
   const changePct = prev ? ((latest.close - prev.close) / prev.close) * 100 : 0
 
   return (
-    <div className="max-w-7xl">
+    <div className="w-full">
       <div className="mb-4">
         <a href="/" className="text-slate-400 hover:text-slate-200 text-sm">← 返回推薦清單</a>
       </div>
@@ -84,14 +84,13 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
         )}
       </div>
 
-      {/* 主體：桌面左右分欄，手機上下 */}
-      <div className="flex flex-col lg:flex-row gap-4">
+      {/* 主體：桌面左右分欄，手機上下；財報在手機排最後 */}
+      <div className="flex flex-wrap lg:flex-nowrap gap-4">
 
-        {/* 左欄：圖表 + 分數 + 財務 */}
-        <div className="flex-1 min-w-0">
-          {/* 圖表 */}
+        {/* 左欄：圖表（手機 order-1，桌面正常） */}
+        <div className="w-full lg:flex-1 lg:min-w-0 order-1">
           {data.prices.length > 0 && (
-            <div className="bg-slate-800 rounded-xl p-4 mb-4">
+            <div className="bg-slate-800 rounded-xl p-4">
               <div className="flex items-center gap-3 mb-3">
                 <span className="text-slate-400 text-xs">均線</span>
                 {([5, 10, 20, 60] as const).map(p => (
@@ -117,44 +116,11 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
               />
             </div>
           )}
-
-          {/* 財務資料 */}
-          {data.financials.length > 0 && (
-            <div className="bg-slate-800 rounded-xl p-4 mb-4 lg:mb-0">
-              <h2 className="text-slate-300 text-sm font-medium mb-3">季度財務資料</h2>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-slate-400 border-b border-slate-700">
-                <th className="text-left py-2 px-3">季度</th>
-                <th className="text-right py-2 px-3">營收</th>
-                <th className="text-right py-2 px-3">淨利</th>
-                <th className="text-right py-2 px-3">EPS</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.financials.map((f, i) => (
-                <tr key={i} className="border-b border-slate-700/50">
-                  <td className="py-2 px-3 text-slate-300">{f.year}Q{f.quarter}</td>
-                  <td className="py-2 px-3 text-right font-mono text-slate-300">
-                    {f.revenue ? (f.revenue / 1e8).toFixed(2) + '億' : '-'}
-                  </td>
-                  <td className="py-2 px-3 text-right font-mono text-slate-300">
-                    {f.net_income ? (f.net_income / 1e8).toFixed(2) + '億' : '-'}
-                  </td>
-                  <td className={`py-2 px-3 text-right font-mono ${(f.eps ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {f.eps?.toFixed(2) ?? '-'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-            </div>
-          )}
         </div>
 
-        {/* 右欄：新聞 */}
+        {/* 右欄：新聞（手機 order-2，桌面正常） */}
         {news.length > 0 && (
-          <div className="lg:w-72 xl:w-80 shrink-0">
+          <div className="w-full lg:w-72 xl:w-80 shrink-0 order-2 lg:order-none">
             <div className="bg-slate-800 rounded-xl p-4 lg:sticky lg:top-4 flex flex-col" style={{ maxHeight: '80vh' }}>
               <h2 className="text-slate-300 text-sm font-medium mb-3 shrink-0">最新新聞</h2>
               <ul className="space-y-3 overflow-y-auto pr-1">
@@ -170,6 +136,41 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
                   </li>
                 ))}
               </ul>
+            </div>
+          </div>
+        )}
+
+        {/* 財務資料（手機 order-3 排最後，桌面撐滿底部） */}
+        {data.financials.length > 0 && (
+          <div className="w-full order-3">
+            <div className="bg-slate-800 rounded-xl p-4">
+              <h2 className="text-slate-300 text-sm font-medium mb-3">季度財務資料</h2>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-slate-400 border-b border-slate-700">
+                    <th className="text-left py-2 px-3">季度</th>
+                    <th className="text-right py-2 px-3">營收</th>
+                    <th className="text-right py-2 px-3">淨利</th>
+                    <th className="text-right py-2 px-3">EPS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.financials.map((f, i) => (
+                    <tr key={i} className="border-b border-slate-700/50">
+                      <td className="py-2 px-3 text-slate-300">{f.year}Q{f.quarter}</td>
+                      <td className="py-2 px-3 text-right font-mono text-slate-300">
+                        {f.revenue ? (f.revenue / 1e8).toFixed(2) + '億' : '-'}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-slate-300">
+                        {f.net_income ? (f.net_income / 1e8).toFixed(2) + '億' : '-'}
+                      </td>
+                      <td className={`py-2 px-3 text-right font-mono ${(f.eps ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {f.eps?.toFixed(2) ?? '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
