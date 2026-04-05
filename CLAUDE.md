@@ -22,6 +22,13 @@
 - 不要 amend，不要 force push，不要改 git config
 - push 前不需要確認，我說 push 就直接 push
 
+## 測試
+- 測試自動執行：每次 Edit/Write 會觸發 `pytest ml/tests/ -x -q`（PostToolUse hook）
+- 手動跑：`conda run -n stock python3 -m pytest ml/tests/ -v`
+- 測試覆蓋：基本面(fundamentals)、特徵(features)、規則引擎(rule_engine)、策略(strategies)、資料完整性(data_integrity)
+- 新增功能時要補對應測試，改動邏輯要確保現有測試通過
+- 測試失敗時停下來修，不要跳過
+
 ## 除錯
 - 先讀 error message，定位根因，不要盲猜亂試
 - 改一處測一次，不要一次改多處
@@ -58,8 +65,9 @@ ml/                     # Python ML 模組（conda env: stock）
   train.py              # XGBoost 訓練：相對強勢標籤（top 30%）
   predict.py            # 混合預測：ML × 權重 + 規則 × 權重
   backtest.py           # 規則回測 → rule_scores.json
-  stock_list.py         # 股票清單（.TW / .TWO）
-data/stock.db           # SQLite 資料庫
+  stock_list.py         # 股票清單（僅上市 .TW）
+  tests/                # pytest 測試（38 tests）
+data/stock.db           # SQLite 資料庫（僅上市）
 ```
 
 ## 核心架構
@@ -122,3 +130,4 @@ watch_thresh = 0.50 + (market_win_rate - 0.50) × 0.30
 - ROE 用平均 equity（當季+前季）、股數用 4 季中位數
 - pandas 3.0：groupby 標籤用 `transform` 而非 `apply`（apply 會移除 key 欄）
 - recommendations API 的 limit 預設 50，前端用 `limit=2000` 載入全部
+- 只處理上市股票（.TW / TSE），不含上櫃（.TWO / OTC）：sync/features/predict/backtest 全部只查 market='TSE'

@@ -693,7 +693,7 @@ def run_rule_engine():
     market_env = "熊市" if market_win_rate < 0.42 else ("牛市" if market_win_rate > 0.55 else "正常")
     print(f"市場近期勝率：{market_win_rate:.1%}（{market_env}，動態門檻基準）", flush=True)
 
-    symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM stocks").fetchall()]
+    symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM stocks WHERE market='TSE'").fetchall()]
 
     # == Pass 1：計算所有股票的 12-1 月動量，建立 RS 排名 ==
     from scipy.stats import percentileofscore

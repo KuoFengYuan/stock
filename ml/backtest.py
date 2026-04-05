@@ -64,7 +64,7 @@ MIN_RELIABLE_SAMPLES = 200
 
 
 def _load_price_panel(conn) -> dict:
-    symbols = [r[0] for r in conn.execute("SELECT symbol FROM stocks").fetchall()]
+    symbols = [r[0] for r in conn.execute("SELECT symbol FROM stocks WHERE market='TSE'").fetchall()]
     panel = {}
     for symbol in symbols:
         rows = conn.execute(

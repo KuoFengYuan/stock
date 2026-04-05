@@ -24,8 +24,11 @@ import yfinance as yf
 
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 
-from stock_list import ALL_STOCKS, _DYNAMIC_NAMES
+from stock_list import ALL_STOCKS as _ALL_STOCKS_RAW, _DYNAMIC_NAMES
 from tw_names import TW_NAMES
+
+# 只保留上市股票（.TW），排除上櫃（.TWO）
+ALL_STOCKS = [s for s in _ALL_STOCKS_RAW if s.endswith(".TW")]
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -34,14 +37,12 @@ requests.packages.urllib3.disable_warnings()
 
 # symbol -> 純數字代碼對照
 def _code(symbol: str) -> str:
-    if symbol.endswith(".TWO"):
-        return symbol[:-4]   # '1240.TWO' -> '1240'
     if symbol.endswith(".TW"):
         return symbol[:-3]   # '2330.TW' -> '2330'
     return symbol
 
-TSE_SYMBOLS = {_code(s): s for s in ALL_STOCKS if s.endswith(".TW")}
-OTC_SYMBOLS = {_code(s): s for s in ALL_STOCKS if s.endswith(".TWO")}
+TSE_SYMBOLS = {_code(s): s for s in ALL_STOCKS}
+OTC_SYMBOLS = {}  # 不再同步上櫃
 
 
 def get_conn():
@@ -603,36 +604,21 @@ def fetch_twse_margin(target_date: date) -> dict[str, dict]:
 
 
 def sync_chips(conn):
-    """同步三大法人 + 融資融券（增量）"""
+    """同步三大法人 + 融資融券（增量，僅上市）"""
     started_at = int(time.time() * 1000)
 
-    # 分別找 TSE / OTC 的最新日期，取較早者作為起始（避免 OTC 缺資料被跳過）
-    tse_latest = conn.execute(
-        "SELECT MAX(i.date) FROM institutional i JOIN stocks s ON s.symbol=i.symbol WHERE s.market='TSE'"
-    ).fetchone()[0]
-    otc_latest = conn.execute(
-        "SELECT MAX(i.date) FROM institutional i JOIN stocks s ON s.symbol=i.symbol WHERE s.market='OTC'"
-    ).fetchone()[0]
+    row = conn.execute("SELECT MAX(date) FROM institutional").fetchone()
+    latest_in_db = row[0] if row and row[0] else None
 
-    # 若 OTC 完全沒資料，從近180天開始補；否則取兩者較早的日期
     today = date.today()
-    if not tse_latest and not otc_latest:
-        start = today - timedelta(days=270)
+    if latest_in_db:
+        start = datetime.strptime(latest_in_db, "%Y-%m-%d").date()
+        dates_to_fill = [start + timedelta(days=i) for i in range(1, (today - start).days + 1)]
+        dates_to_fill = [d for d in dates_to_fill if d.weekday() < 5]
     else:
-        candidates = [d for d in [tse_latest, otc_latest] if d]
-        earliest = min(candidates)
-        start = datetime.strptime(earliest, "%Y-%m-%d").date()
-
-    dates_to_fill = [start + timedelta(days=i) for i in range(1, (today - start).days + 1)]
-    dates_to_fill = [d for d in dates_to_fill if d.weekday() < 5]
-
-    if not otc_latest:
-        # OTC 從未同步：補近270天（約一年）
-        otc_start = today - timedelta(days=270)
-        otc_dates = [otc_start + timedelta(days=i) for i in range((today - otc_start).days + 1)]
-        otc_dates = [d for d in otc_dates if d.weekday() < 5]
-        # 合併去重
-        dates_to_fill = sorted(set(dates_to_fill) | set(otc_dates))
+        start = today - timedelta(days=270)
+        dates_to_fill = [start + timedelta(days=i) for i in range((today - start).days + 1)]
+        dates_to_fill = [d for d in dates_to_fill if d.weekday() < 5]
 
     if not dates_to_fill:
         print("籌碼資料已是最新", flush=True)
@@ -645,13 +631,12 @@ def sync_chips(conn):
     for d in dates_to_fill:
         date_str = d.strftime("%Y-%m-%d")
 
-        # 三大法人
+        # 三大法人（僅上市）
         tse_inst = fetch_twse_institutional(d)
-        otc_inst = fetch_tpex_institutional(d)
         day_inst = 0
 
-        for code, v in {**tse_inst, **otc_inst}.items():
-            symbol = TSE_SYMBOLS.get(code) or OTC_SYMBOLS.get(code)
+        for code, v in tse_inst.items():
+            symbol = TSE_SYMBOLS.get(code)
             if not symbol:
                 continue
             try:

@@ -38,7 +38,7 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
         conn.row_factory = sqlite3.Row
         close_conn = True
 
-    symbols = [r[0] for r in conn.execute("SELECT symbol FROM stocks").fetchall()]
+    symbols = [r[0] for r in conn.execute("SELECT symbol FROM stocks WHERE market='TSE'").fetchall()]
 
     all_financials = _load_all_financials(conn)
     all_inst = _load_all_institutional(conn)

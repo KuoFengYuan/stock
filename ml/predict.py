@@ -64,7 +64,7 @@ def run_predict():
     rule_weight = 1.0 - ml_weight
     print(f"模型 AUC={model_auc:.4f}，ML權重={ml_weight:.2f}，規則權重={rule_weight:.2f}", flush=True)
 
-    symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM stocks").fetchall()]
+    symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM stocks WHERE market='TSE'").fetchall()]
     count = 0
     started_at = int(time.time() * 1000)
 
