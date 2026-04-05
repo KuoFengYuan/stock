@@ -136,6 +136,19 @@ def sync_stock_list(conn):
             (symbol, name, market, now)
         )
         count += 1
+
+    # 清除不在清單中的股票及其關聯資料
+    placeholders = ",".join("?" * len(ALL_STOCKS))
+    for table in ("stock_prices", "institutional", "margin_trading", "financials", "monthly_revenue", "recommendations"):
+        cur = conn.execute(
+            f"DELETE FROM {table} WHERE symbol NOT IN ({placeholders})", ALL_STOCKS
+        )
+        if cur.rowcount:
+            print(f"  purge {table}: {cur.rowcount} rows", flush=True)
+    cur = conn.execute(f"DELETE FROM stocks WHERE symbol NOT IN ({placeholders})", ALL_STOCKS)
+    if cur.rowcount:
+        print(f"  purge stocks: {cur.rowcount} rows", flush=True)
+
     conn.commit()
     print(f"股票清單：{count} 檔", flush=True)
     return count

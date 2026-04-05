@@ -25,8 +25,8 @@ lib/
   db/                             # better-sqlite3 + Drizzle ORM + migration
   analysis/ml-runner.ts           # child_process.spawn / stream 執行 Python
 ml/                               # Python ML 模組（conda env: stock）
-  sync.py                         # 資料同步：TWSE API + FinMind + yfinance → SQLite
-  features.py                     # 特徵工程：17 維特徵
+  sync.py                         # 資料同步：TWSE API + MOPS + yfinance → SQLite（含自動 purge 舊股）
+  features.py                     # 特徵工程：19 維特徵
   fundamentals.py                 # 基本面計算（共用模組）
   strategies.py                   # Piotroski F-Score / PEG / Minervini SEPA
   rule_engine.py                  # 規則引擎：五層乘數評分
@@ -120,7 +120,7 @@ watch_thresh = 0.50 + (market_win_rate - 0.50) × 0.30
 
 | 項目 | 值 |
 |------|-----|
-| 特徵數 | 17（技術 8 + 基本面 7 + 籌碼 2） |
+| 特徵數 | 19（技術 8 + 基本面 7 + 籌碼 4） |
 | 標籤 | 相對強勢：60 交易日報酬排全市場前 30% 且 > 0% |
 | 除權息過濾 | 相鄰日跌 > 20% → 前 60 天 label 排除 |
 | 不平衡處理 | scale_pos_weight = 負例數/正例數 |
@@ -148,7 +148,7 @@ watch_thresh = 0.50 + (market_win_rate - 0.50) × 0.30
 | 三大法人 | TWSE T86 API | 股（DB 原值） | 每日 |
 | 融資融券 | TWSE MI_MARGN API | 張 | 每日 |
 | 季度財報 | yfinance | 元 | 每季 |
-| 月營收 | FinMind API | 元 | 每月 |
+| 月營收 | MOPS 公開資訊觀測站 | 元 | 每月 |
 
 **重要**：`institutional` 表存的是「股」，前端顯示時 `÷1000` 換算「張」。
 
@@ -209,7 +209,8 @@ pip install -r ml/requirements.txt
 ### 啟動
 
 ```bash
-npm run dev   # http://localhost:3000
+npm run dev     # 開發模式：http://localhost:3000
+npm run deploy  # 正式環境：build + start
 ```
 
 ### 測試
@@ -241,6 +242,6 @@ Claude Code 已設定 PostToolUse hook：每次 Edit/Write 自動跑測試。
 | 資料庫 | SQLite（better-sqlite3）+ Drizzle ORM |
 | ML | XGBoost 2.1 + scikit-learn + pandas-ta |
 | 策略 | Piotroski F-Score + PEG Ratio + Minervini SEPA |
-| 資料來源 | TWSE、yfinance、FinMind |
+| 資料來源 | TWSE、yfinance、MOPS |
 | 並行 | ThreadPoolExecutor（價格 120 workers、財報 20 workers） |
 | 測試 | pytest（38 tests）+ Claude Code hook 自動觸發 |
