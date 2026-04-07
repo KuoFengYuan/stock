@@ -209,8 +209,11 @@ pip install -r ml/requirements.txt
 ### 啟動
 
 ```bash
-npm run dev     # 開發模式：http://localhost:3000
-npm run deploy  # 正式環境：build + start
+# 本機開發
+./dev.sh        # 啟動 Next.js dev server（port 3000）
+
+# GCP 部署
+./deploy-gcp.sh # 不要加 sudo（nginx 步驟內部自動 sudo）
 ```
 
 ### 測試
