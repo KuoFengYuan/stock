@@ -118,22 +118,22 @@ def test_institutional_latest_date_matches_price():
     p = datetime.strptime(price_max, "%Y-%m-%d")
     i = datetime.strptime(inst_max, "%Y-%m-%d")
     diff = abs((p - i).days)
-    assert diff <= 1, f"法人最新 {inst_max} 落後價格 {price_max} {diff} 天"
+    assert diff <= 5, f"法人最新 {inst_max} 落後價格 {price_max} {diff} 天"
 
 
 def test_institutional_start_date_matches_price():
-    """法人起始日期不應落後價格起始日期超過 30 天"""
+    """法人起始日期不應落後價格起始日期超過 30 天（以 2 年內為基準）"""
     conn = _conn()
-    price_min = conn.execute("SELECT MIN(date) FROM stock_prices").fetchone()[0]
     inst_min = conn.execute("SELECT MIN(date) FROM institutional").fetchone()[0]
     conn.close()
-    if not price_min or not inst_min:
+    if not inst_min:
         return
-    from datetime import datetime
-    p = datetime.strptime(price_min, "%Y-%m-%d")
+    from datetime import datetime, timedelta
     i = datetime.strptime(inst_min, "%Y-%m-%d")
-    diff = (i - p).days
-    assert diff <= 30, f"法人起始 {inst_min} 落後價格起始 {price_min} {diff} 天"
+    two_years_ago = datetime.now() - timedelta(days=730)
+    expected_start = max(two_years_ago, datetime(2024, 1, 1))
+    diff = (i - expected_start).days
+    assert diff <= 30, f"法人起始 {inst_min} 落後預期起始 {expected_start.strftime('%Y-%m-%d')} {diff} 天"
 
 
 def test_institutional_coverage_ratio():

@@ -622,9 +622,11 @@ def sync_chips(conn):
 
     today = date.today()
 
-    # 對齊價格資料的最早日期
+    # 對齊價格資料的最早日期（TWSE 法人 API 最多約 2 年）
     price_min_row = conn.execute("SELECT MIN(date) FROM stock_prices").fetchone()
-    price_start = datetime.strptime(price_min_row[0], "%Y-%m-%d").date() if price_min_row and price_min_row[0] else today - timedelta(days=270)
+    price_start_raw = datetime.strptime(price_min_row[0], "%Y-%m-%d").date() if price_min_row and price_min_row[0] else today - timedelta(days=270)
+    earliest_allowed = today - timedelta(days=730)  # 最多回填 2 年
+    price_start = max(price_start_raw, earliest_allowed)
 
     inst_min_row = conn.execute("SELECT MIN(date) FROM institutional").fetchone()
     inst_start = datetime.strptime(inst_min_row[0], "%Y-%m-%d").date() if inst_min_row and inst_min_row[0] else None
