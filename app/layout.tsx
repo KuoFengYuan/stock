@@ -17,7 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <a href="/settings" className="text-slate-300 hover:text-white text-sm">篩選設定</a>
           <a href="/model" className="text-slate-300 hover:text-white text-sm">模型</a>
         </nav>
-        <main className="px-3 py-4 sm:px-6 sm:py-6">{children}</main>
+        <main className="px-3 py-4 sm:px-6 sm:py-6 overflow-x-hidden">{children}</main>
       </body>
     </html>
   )

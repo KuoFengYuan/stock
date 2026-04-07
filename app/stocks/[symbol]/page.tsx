@@ -58,7 +58,7 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
   const changePct = prev ? ((latest.close - prev.close) / prev.close) * 100 : 0
 
   return (
-    <div className="w-full">
+    <div className="w-full max-w-7xl overflow-x-hidden">
       <div className="mb-4">
         <a href="/" className="text-slate-400 hover:text-slate-200 text-sm">← 返回推薦清單</a>
       </div>
@@ -88,7 +88,7 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
       <div className="flex flex-col lg:flex-row gap-4 mb-4">
         {/* 圖表 */}
         {data.prices.length > 0 && (
-          <div className="flex-1 min-w-0 bg-slate-800 rounded-xl p-4">
+          <div className="flex-1 min-w-0 bg-slate-800 rounded-xl p-2 sm:p-4 overflow-hidden">
             <div className="flex items-center gap-3 mb-3">
               <span className="text-slate-400 text-xs">均線</span>
               {([5, 10, 20, 60] as const).map(p => (
