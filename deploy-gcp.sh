@@ -3,7 +3,8 @@
 set -e
 
 echo "=== 停止舊 server ==="
-pkill -f "node.*next" 2>/dev/null || true
+fuser -k 3031/tcp 2>/dev/null || true
+sleep 1
 
 echo "=== 更新程式碼 ==="
 git pull origin master
@@ -15,14 +16,14 @@ echo "=== Build ==="
 npm run build
 
 echo "=== 啟動 Next.js ==="
-nohup npm start > /tmp/nextjs.log 2>&1 &
-sleep 2
+nohup npm start -- -p 3031 > /tmp/nextjs.log 2>&1 &
+sleep 5
 
-if ! ss -tlnp | grep -q ':3000'; then
+if ! ss -tlnp | grep -q ':3031'; then
   echo "=== Next.js 啟動失敗，查看 /tmp/nextjs.log ==="
   exit 1
 fi
-echo "=== Next.js 啟動成功（port 3000）==="
+echo "=== Next.js 啟動成功（port 3031）==="
 
 echo "=== 同步 nginx 設定 ==="
 sudo cp nginx/stock.conf /etc/nginx/sites-available/stock.conf
