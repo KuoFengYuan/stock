@@ -104,3 +104,45 @@ def test_recommendations_only_tse():
     otc = conn.execute("SELECT COUNT(*) FROM recommendations WHERE symbol LIKE '%.TWO'").fetchone()[0]
     conn.close()
     assert otc == 0
+
+
+def test_institutional_latest_date_matches_price():
+    """法人最新日期應與價格最新日期一致（允許差 1 天）"""
+    conn = _conn()
+    price_max = conn.execute("SELECT MAX(date) FROM stock_prices").fetchone()[0]
+    inst_max = conn.execute("SELECT MAX(date) FROM institutional").fetchone()[0]
+    conn.close()
+    if not price_max or not inst_max:
+        return
+    from datetime import datetime
+    p = datetime.strptime(price_max, "%Y-%m-%d")
+    i = datetime.strptime(inst_max, "%Y-%m-%d")
+    diff = abs((p - i).days)
+    assert diff <= 1, f"法人最新 {inst_max} 落後價格 {price_max} {diff} 天"
+
+
+def test_institutional_start_date_matches_price():
+    """法人起始日期不應落後價格起始日期超過 30 天"""
+    conn = _conn()
+    price_min = conn.execute("SELECT MIN(date) FROM stock_prices").fetchone()[0]
+    inst_min = conn.execute("SELECT MIN(date) FROM institutional").fetchone()[0]
+    conn.close()
+    if not price_min or not inst_min:
+        return
+    from datetime import datetime
+    p = datetime.strptime(price_min, "%Y-%m-%d")
+    i = datetime.strptime(inst_min, "%Y-%m-%d")
+    diff = (i - p).days
+    assert diff <= 30, f"法人起始 {inst_min} 落後價格起始 {price_min} {diff} 天"
+
+
+def test_institutional_coverage_ratio():
+    """有價格的股票應至少 90% 有法人資料"""
+    conn = _conn()
+    price_symbols = conn.execute("SELECT COUNT(DISTINCT symbol) FROM stock_prices").fetchone()[0]
+    inst_symbols = conn.execute("SELECT COUNT(DISTINCT symbol) FROM institutional").fetchone()[0]
+    conn.close()
+    if price_symbols == 0:
+        return
+    ratio = inst_symbols / price_symbols
+    assert ratio >= 0.90, f"法人覆蓋率 {ratio:.0%} 低於 90%"
