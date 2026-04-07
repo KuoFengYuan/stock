@@ -24,9 +24,10 @@ export async function GET(
     'SELECT year, quarter, revenue, net_income, eps, equity, total_assets, total_debt FROM financials WHERE symbol = ? ORDER BY year DESC, quarter DESC LIMIT 8'
   ).all(symbol)
 
+  const priceStartDate = prices.length > 0 ? prices[0].date : '1970-01-01'
   const institutional = db.prepare(
-    'SELECT date, foreign_net, trust_net, dealer_net, total_net FROM institutional WHERE symbol = ? ORDER BY date ASC'
-  ).all(symbol) as { date: string; foreign_net: number; trust_net: number; dealer_net: number; total_net: number }[]
+    'SELECT date, foreign_net, trust_net, dealer_net, total_net FROM institutional WHERE symbol = ? AND date >= ? ORDER BY date ASC'
+  ).all(symbol, priceStartDate) as { date: string; foreign_net: number; trust_net: number; dealer_net: number; total_net: number }[]
 
   const scoreHistory = db.prepare(
     'SELECT date, score, signal FROM recommendations WHERE symbol = ? ORDER BY date ASC'
