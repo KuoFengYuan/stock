@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "deploy": "next build && next start",
+    "develop": "next build && next start -p 3000",
     "lint": "eslint"
   },
   "dependencies": {
