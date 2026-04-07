@@ -74,7 +74,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       grid: { vertLines: { color: '#334155' }, horzLines: { color: '#334155' } },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: '#475569' },
-      timeScale: { borderColor: '#475569', timeVisible: false, fixLeftEdge: true, fixRightEdge: true },
+      timeScale: { borderColor: '#475569', timeVisible: false },
     }
 
     // ── K 線圖 ──
@@ -202,8 +202,14 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     if (foreignChart) syncFrom(foreignChart, [priceChart, volChart, trustChart])
     if (trustChart) syncFrom(trustChart, [priceChart, volChart, foreignChart])
 
-    priceChart.timeScale().fitContent()
-    allCharts.forEach(c => { if (c !== priceChart) c.timeScale().fitContent() })
+    if (prices.length > 0) {
+      const last = prices[prices.length - 1].date
+      const from = prices[Math.max(0, prices.length - 7)].date
+      allCharts.forEach(c => c.timeScale().setVisibleRange({ from, to: last }))
+    } else {
+      priceChart.timeScale().fitContent()
+      allCharts.forEach(c => { if (c !== priceChart) c.timeScale().fitContent() })
+    }
 
     chartsRef.current = allCharts
 
