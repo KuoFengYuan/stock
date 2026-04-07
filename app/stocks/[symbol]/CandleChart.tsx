@@ -219,10 +219,15 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     const containers = [priceRef.current, volRef.current, foreignRef.current, trustRef.current].filter(Boolean) as HTMLDivElement[]
     const maxScroll = -(prices.length - 60)
 
+    function resetBarSpacing() {
+      allCharts.forEach(c => c.timeScale().applyOptions({ barSpacing: 8 }))
+    }
+
     function clampScroll(delta: number) {
       const pos = priceChart.timeScale().scrollPosition()
       const newPos = Math.max(maxScroll, Math.min(0, pos + delta))
       allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
+      resetBarSpacing()
     }
 
     // 滾輪
@@ -239,9 +244,10 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     const mouseMove = (e: MouseEvent) => {
       if (!dragging) return
       const dx = e.clientX - dragStartX
-      const barDelta = dx / 8 // barSpacing = 8
+      const barDelta = dx / 8
       const newPos = Math.max(maxScroll, Math.min(0, dragStartPos + barDelta))
       allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
+      resetBarSpacing()
     }
     const mouseUp = () => { dragging = false }
 
@@ -255,6 +261,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       const barDelta = dx / 8
       const newPos = Math.max(maxScroll, Math.min(0, touchStartPos + barDelta))
       allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
+      resetBarSpacing()
     }
 
     containers.forEach(el => {
