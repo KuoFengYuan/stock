@@ -681,54 +681,64 @@ def sync_chips(conn):
     inst_total = 0
     margin_total = 0
 
-    for d in dates_to_fill:
-        date_str = d.strftime("%Y-%m-%d")
-
-        # 三大法人（僅上市）
+    def _fetch_day(d):
+        """並行抓取單日法人 + 融資券"""
+        time.sleep(0.3)  # 錯開請求
         tse_inst = fetch_twse_institutional(d)
-        day_inst = 0
-
-        for code, v in tse_inst.items():
-            symbol = TSE_SYMBOLS.get(code)
-            if not symbol:
-                continue
-            try:
-                conn.execute(
-                    "INSERT OR REPLACE INTO institutional (symbol, date, foreign_net, trust_net, dealer_net, total_net) VALUES (?,?,?,?,?,?)",
-                    (symbol, date_str, v["foreign_net"], v["trust_net"], v["dealer_net"], v["total_net"])
-                )
-                day_inst += 1
-            except Exception:
-                pass
-
-        # 融資融券（只有上市）
         margin = fetch_twse_margin(d)
-        day_margin = 0
-        for code, v in margin.items():
-            symbol = TSE_SYMBOLS.get(code)
-            if not symbol:
-                continue
-            try:
-                conn.execute(
-                    "INSERT OR REPLACE INTO margin_trading (symbol, date, margin_buy, margin_sell, margin_balance, short_buy, short_sell, short_balance) VALUES (?,?,?,?,?,?,?,?)",
-                    (symbol, date_str, v["margin_buy"], v["margin_sell"], v["margin_balance"], v["short_buy"], v["short_sell"], v["short_balance"])
-                )
-                day_margin += 1
-            except Exception:
-                pass
+        return d, tse_inst, margin
+
+    # 分批並行（每批 5 天，避免 TWSE rate limit）
+    BATCH_SIZE = 5
+    for batch_start in range(0, len(dates_to_fill), BATCH_SIZE):
+        batch = dates_to_fill[batch_start:batch_start + BATCH_SIZE]
+
+        with ThreadPoolExecutor(max_workers=BATCH_SIZE) as executor:
+            futures = {executor.submit(_fetch_day, d): d for d in batch}
+            results = []
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        for d, tse_inst, margin in sorted(results, key=lambda x: x[0]):
+            date_str = d.strftime("%Y-%m-%d")
+            day_inst = 0
+            for code, v in tse_inst.items():
+                symbol = TSE_SYMBOLS.get(code)
+                if not symbol:
+                    continue
+                try:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO institutional (symbol, date, foreign_net, trust_net, dealer_net, total_net) VALUES (?,?,?,?,?,?)",
+                        (symbol, date_str, v["foreign_net"], v["trust_net"], v["dealer_net"], v["total_net"])
+                    )
+                    day_inst += 1
+                except Exception:
+                    pass
+
+            day_margin = 0
+            for code, v in margin.items():
+                symbol = TSE_SYMBOLS.get(code)
+                if not symbol:
+                    continue
+                try:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO margin_trading (symbol, date, margin_buy, margin_sell, margin_balance, short_buy, short_sell, short_balance) VALUES (?,?,?,?,?,?,?,?)",
+                        (symbol, date_str, v["margin_buy"], v["margin_sell"], v["margin_balance"], v["short_buy"], v["short_sell"], v["short_balance"])
+                    )
+                    day_margin += 1
+                except Exception:
+                    pass
+
+            if day_inst > 0 or day_margin > 0:
+                print(f"  {date_str}: 法人 {day_inst} 檔, 融資券 {day_margin} 檔", flush=True)
+            else:
+                print(f"  {date_str}: 休市或無資料", flush=True)
+
+            inst_total += day_inst
+            margin_total += day_margin
 
         conn.commit()
-        if day_inst > 0 or day_margin > 0:
-            print(f"  {date_str}: 法人 {day_inst} 檔, 融資券 {day_margin} 檔", flush=True)
-        else:
-            print(f"  {date_str}: 休市或無資料", flush=True)
-
-        inst_total += day_inst
-        margin_total += day_margin
-        if day_inst == 0 and day_margin == 0:
-            time.sleep(0.5)  # 休市，快速跳過
-        else:
-            time.sleep(1)
+        time.sleep(1)  # 批次間休息
 
     log_sync(conn, "chips", "success", inst_total + margin_total, started_at=started_at)
     print(f"籌碼同步完成：法人 {inst_total} 筆，融資券 {margin_total} 筆", flush=True)
