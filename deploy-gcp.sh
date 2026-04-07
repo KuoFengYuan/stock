@@ -1,5 +1,6 @@
 #!/bin/bash
 # GCP VM 部署用（Ubuntu/Debian）
+# 用法：./deploy-gcp.sh（不要加 sudo）
 set -e
 
 echo "=== 停止舊 server ==="
