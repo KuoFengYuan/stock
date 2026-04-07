@@ -725,7 +725,10 @@ def sync_chips(conn):
 
         inst_total += day_inst
         margin_total += day_margin
-        time.sleep(3)
+        if day_inst == 0 and day_margin == 0:
+            time.sleep(0.5)  # 休市，快速跳過
+        else:
+            time.sleep(1)
 
     log_sync(conn, "chips", "success", inst_total + margin_total, started_at=started_at)
     print(f"籌碼同步完成：法人 {inst_total} 筆，融資券 {margin_total} 筆", flush=True)
