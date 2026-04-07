@@ -537,8 +537,32 @@ def fetch_twse_institutional(target_date: date) -> dict[str, dict]:
                 pass
         return result
     except Exception as e:
-        print(f"  [TWSE 三大法人 ERROR] {e}", flush=True)
-        return {}
+        print(f"  [TWSE 三大法人 ERROR] {e}，5秒後重試...", flush=True)
+        time.sleep(5)
+        try:
+            r = SESSION.get(url, timeout=20)
+            data = r.json()
+            if data.get("stat") != "OK":
+                return {}
+            result = {}
+            for row in data.get("data", []):
+                code = row[0].strip()
+                if code not in TSE_SYMBOLS:
+                    continue
+                try:
+                    def _n(s): return int(s.replace(",", "").replace(" ", "") or 0)
+                    result[code] = {
+                        "foreign_net": _n(row[4]),
+                        "trust_net":   _n(row[10]),
+                        "dealer_net":  _n(row[11]),
+                        "total_net":   _n(row[18]),
+                    }
+                except Exception:
+                    pass
+            return result
+        except Exception as e2:
+            print(f"  [TWSE 三大法人 RETRY FAILED] {e2}", flush=True)
+            return {}
 
 
 def fetch_tpex_institutional(target_date: date) -> dict[str, dict]:
@@ -701,6 +725,7 @@ def sync_chips(conn):
 
         inst_total += day_inst
         margin_total += day_margin
+        time.sleep(3)
 
     log_sync(conn, "chips", "success", inst_total + margin_total, started_at=started_at)
     print(f"籌碼同步完成：法人 {inst_total} 筆，融資券 {margin_total} 筆", flush=True)
