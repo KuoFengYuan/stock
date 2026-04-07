@@ -17,7 +17,7 @@ export async function GET(
   const prices = db.prepare(
     `SELECT date, open, high, low, close, volume FROM stock_prices
      WHERE symbol = ?
-     ORDER BY date DESC LIMIT 120`
+     ORDER BY date DESC LIMIT 500`
   ).all(symbol).reverse() as { date: string; open: number; high: number; low: number; close: number; volume: number }[]
 
   const financials = db.prepare(
