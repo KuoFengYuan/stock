@@ -21,16 +21,17 @@ print(json.dumps(result))
 `
 
   return new Promise<NextResponse>((resolve) => {
+    const fs = require('fs')
+    const home = process.env.HOME || ''
     const condaCandidates = [
       process.env.CONDA_EXE,
-      '/opt/homebrew/Caskroom/miniconda/base/bin/conda',
+      `${home}/miniconda3/bin/conda`,
+      `${home}/miniconda3/condabin/conda`,
       '/usr/local/miniconda3/bin/conda',
-      `${process.env.HOME}/miniconda3/bin/conda`,
-      `${process.env.HOME}/miniconda3/condabin/conda`,
+      '/opt/homebrew/Caskroom/miniconda/base/bin/conda',
       'C:\\Users\\Will\\miniconda3\\Scripts\\conda.exe',
     ].filter(Boolean) as string[]
 
-    const fs = require('fs')
     const conda = condaCandidates.find(p => { try { return fs.existsSync(p) } catch { return false } })
       || 'conda'
 
