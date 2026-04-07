@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
         })
         return new Response(msg + '\n', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
       }
-      mode = 'prices'
+      mode = 'prices_chips'
       skippedFinancials = true
     }
   }

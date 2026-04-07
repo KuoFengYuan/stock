@@ -889,14 +889,14 @@ if __name__ == "__main__":
     print("同步股票清單...", flush=True)
     sync_stock_list(conn)
 
-    if mode in ("prices", "all"):
+    if mode in ("prices", "prices_chips", "all"):
         sync_prices(conn)
         sync_otc_prices_yf(conn)  # 補齊 TPEX 被 WAF 擋的上櫃股票
 
     if mode in ("financials", "all"):
         sync_financials(conn)
 
-    if mode in ("chips", "all"):
+    if mode in ("chips", "prices_chips", "all"):
         sync_chips(conn)
 
     if mode in ("monthly_revenue", "all"):
