@@ -219,8 +219,11 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     const containers = [priceRef.current, volRef.current, foreignRef.current, trustRef.current].filter(Boolean) as HTMLDivElement[]
     const wheelHandler = (e: WheelEvent) => {
       e.preventDefault()
-      const delta = Math.sign(e.deltaY) * 5
-      allCharts.forEach(c => c.timeScale().scrollPosition() !== undefined && c.timeScale().scrollToPosition(c.timeScale().scrollPosition() - delta, false))
+      const delta = Math.sign(e.deltaY) * 3
+      const pos = priceChart.timeScale().scrollPosition()
+      const newPos = pos - delta
+      if (newPos > 0) return
+      allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
     }
     containers.forEach(el => el.addEventListener('wheel', wheelHandler, { passive: false }))
 
