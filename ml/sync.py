@@ -620,18 +620,32 @@ def sync_chips(conn):
     """同步三大法人 + 融資融券（增量，僅上市）"""
     started_at = int(time.time() * 1000)
 
+    today = date.today()
+
+    # 對齊價格資料的最早日期
+    price_min_row = conn.execute("SELECT MIN(date) FROM stock_prices").fetchone()
+    price_start = datetime.strptime(price_min_row[0], "%Y-%m-%d").date() if price_min_row and price_min_row[0] else today - timedelta(days=270)
+
+    inst_min_row = conn.execute("SELECT MIN(date) FROM institutional").fetchone()
+    inst_start = datetime.strptime(inst_min_row[0], "%Y-%m-%d").date() if inst_min_row and inst_min_row[0] else None
+
     row = conn.execute("SELECT MAX(date) FROM institutional").fetchone()
     latest_in_db = row[0] if row and row[0] else None
 
-    today = date.today()
+    # 需要補的日期：前面的缺口 + 後面的增量
+    dates_to_fill = []
+    if inst_start and price_start < inst_start:
+        # 回填缺口
+        gap_dates = [price_start + timedelta(days=i) for i in range((inst_start - price_start).days)]
+        dates_to_fill += [d for d in gap_dates if d.weekday() < 5]
+
     if latest_in_db:
         start = datetime.strptime(latest_in_db, "%Y-%m-%d").date()
-        dates_to_fill = [start + timedelta(days=i) for i in range(1, (today - start).days + 1)]
-        dates_to_fill = [d for d in dates_to_fill if d.weekday() < 5]
+        new_dates = [start + timedelta(days=i) for i in range(1, (today - start).days + 1)]
+        dates_to_fill += [d for d in new_dates if d.weekday() < 5]
     else:
-        start = today - timedelta(days=270)
-        dates_to_fill = [start + timedelta(days=i) for i in range((today - start).days + 1)]
-        dates_to_fill = [d for d in dates_to_fill if d.weekday() < 5]
+        all_dates = [price_start + timedelta(days=i) for i in range((today - price_start).days + 1)]
+        dates_to_fill = [d for d in all_dates if d.weekday() < 5]
 
     if not dates_to_fill:
         print("籌碼資料已是最新", flush=True)
