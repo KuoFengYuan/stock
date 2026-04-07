@@ -75,7 +75,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: '#475569' },
       timeScale: { borderColor: '#475569', timeVisible: false, barSpacing: 8, minBarSpacing: 8 },
-      handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScroll: false,
       handleScale: false,
     }
 
@@ -215,20 +215,66 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
     chartsRef.current = allCharts
 
-    // 滾輪 → 水平平移（不縮放）
+    // 自訂滾動：滾輪 + 滑鼠拖曳 + 觸控拖曳
     const containers = [priceRef.current, volRef.current, foreignRef.current, trustRef.current].filter(Boolean) as HTMLDivElement[]
     const maxScroll = -(prices.length - 60)
-    const wheelHandler = (e: WheelEvent) => {
-      e.preventDefault()
-      const delta = Math.sign(e.deltaY) * 3
+
+    function clampScroll(delta: number) {
       const pos = priceChart.timeScale().scrollPosition()
-      const newPos = Math.max(maxScroll, Math.min(0, pos - delta))
+      const newPos = Math.max(maxScroll, Math.min(0, pos + delta))
       allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
     }
-    containers.forEach(el => el.addEventListener('wheel', wheelHandler, { passive: false }))
+
+    // 滾輪
+    const wheelHandler = (e: WheelEvent) => {
+      e.preventDefault()
+      clampScroll(-Math.sign(e.deltaY) * 3)
+    }
+
+    // 滑鼠拖曳
+    let dragging = false
+    let dragStartX = 0
+    let dragStartPos = 0
+    const mouseDown = (e: MouseEvent) => { dragging = true; dragStartX = e.clientX; dragStartPos = priceChart.timeScale().scrollPosition() }
+    const mouseMove = (e: MouseEvent) => {
+      if (!dragging) return
+      const dx = e.clientX - dragStartX
+      const barDelta = dx / 8 // barSpacing = 8
+      const newPos = Math.max(maxScroll, Math.min(0, dragStartPos + barDelta))
+      allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
+    }
+    const mouseUp = () => { dragging = false }
+
+    // 觸控拖曳
+    let touchStartX = 0
+    let touchStartPos = 0
+    const touchStart = (e: TouchEvent) => { touchStartX = e.touches[0].clientX; touchStartPos = priceChart.timeScale().scrollPosition() }
+    const touchMove = (e: TouchEvent) => {
+      e.preventDefault()
+      const dx = e.touches[0].clientX - touchStartX
+      const barDelta = dx / 8
+      const newPos = Math.max(maxScroll, Math.min(0, touchStartPos + barDelta))
+      allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
+    }
+
+    containers.forEach(el => {
+      el.addEventListener('wheel', wheelHandler, { passive: false })
+      el.addEventListener('mousedown', mouseDown)
+      el.addEventListener('touchstart', touchStart, { passive: true })
+      el.addEventListener('touchmove', touchMove, { passive: false })
+    })
+    document.addEventListener('mousemove', mouseMove)
+    document.addEventListener('mouseup', mouseUp)
 
     return () => {
-      containers.forEach(el => el.removeEventListener('wheel', wheelHandler))
+      containers.forEach(el => {
+        el.removeEventListener('wheel', wheelHandler)
+        el.removeEventListener('mousedown', mouseDown)
+        el.removeEventListener('touchstart', touchStart)
+        el.removeEventListener('touchmove', touchMove)
+      })
+      document.removeEventListener('mousemove', mouseMove)
+      document.removeEventListener('mouseup', mouseUp)
       chartsRef.current.forEach(c => c.remove())
       chartsRef.current = []
     }
