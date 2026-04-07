@@ -4,7 +4,7 @@
 set -e
 
 echo "=== 停止舊 server ==="
-fuser -k 3031/tcp 2>/dev/null || true
+sudo fuser -k 3031/tcp 2>/dev/null || true
 sleep 1
 
 echo "=== 更新程式碼 ==="
