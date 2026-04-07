@@ -74,7 +74,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       grid: { vertLines: { color: '#334155' }, horzLines: { color: '#334155' } },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: '#475569' },
-      timeScale: { borderColor: '#475569', timeVisible: false },
+      timeScale: { borderColor: '#475569', timeVisible: false, fixLeftEdge: true, fixRightEdge: true },
     }
 
     // ── K 線圖 ──
