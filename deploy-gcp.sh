@@ -14,7 +14,7 @@ echo "=== 安裝依賴 ==="
 npm install
 
 echo "=== Build ==="
-rm -f .next/lock .next/build-lock
+rm -rf .next
 npm run build
 
 echo "=== 啟動 Next.js ==="
