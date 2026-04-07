@@ -74,7 +74,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       grid: { vertLines: { color: '#334155' }, horzLines: { color: '#334155' } },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: '#475569' },
-      timeScale: { borderColor: '#475569', timeVisible: false, fixLeftEdge: true, fixRightEdge: true, barSpacing: 8, minBarSpacing: 8 },
+      timeScale: { borderColor: '#475569', timeVisible: false, barSpacing: 8, minBarSpacing: 8 },
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
       handleScale: false,
     }
@@ -217,12 +217,12 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
     // 滾輪 → 水平平移（不縮放）
     const containers = [priceRef.current, volRef.current, foreignRef.current, trustRef.current].filter(Boolean) as HTMLDivElement[]
+    const maxScroll = -(prices.length - 60)
     const wheelHandler = (e: WheelEvent) => {
       e.preventDefault()
       const delta = Math.sign(e.deltaY) * 3
       const pos = priceChart.timeScale().scrollPosition()
-      const newPos = pos - delta
-      if (newPos > 0) return
+      const newPos = Math.max(maxScroll, Math.min(0, pos - delta))
       allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
     }
     containers.forEach(el => el.addEventListener('wheel', wheelHandler, { passive: false }))
