@@ -74,8 +74,8 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       grid: { vertLines: { color: '#334155' }, horzLines: { color: '#334155' } },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: '#475569' },
-      timeScale: { borderColor: '#475569', timeVisible: false, fixLeftEdge: true, fixRightEdge: true },
-      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      timeScale: { borderColor: '#475569', timeVisible: false, fixLeftEdge: true, fixRightEdge: true, barSpacing: 8, minBarSpacing: 8 },
+      handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
       handleScale: false,
     }
 
@@ -215,7 +215,17 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
     chartsRef.current = allCharts
 
+    // 滾輪 → 水平平移（不縮放）
+    const containers = [priceRef.current, volRef.current, foreignRef.current, trustRef.current].filter(Boolean) as HTMLDivElement[]
+    const wheelHandler = (e: WheelEvent) => {
+      e.preventDefault()
+      const delta = Math.sign(e.deltaY) * 5
+      allCharts.forEach(c => c.timeScale().scrollPosition() !== undefined && c.timeScale().scrollToPosition(c.timeScale().scrollPosition() - delta, false))
+    }
+    containers.forEach(el => el.addEventListener('wheel', wheelHandler, { passive: false }))
+
     return () => {
+      containers.forEach(el => el.removeEventListener('wheel', wheelHandler))
       chartsRef.current.forEach(c => c.remove())
       chartsRef.current = []
     }
