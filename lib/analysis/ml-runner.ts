@@ -1,5 +1,18 @@
 import { spawn } from 'child_process'
 import path from 'path'
+import fs from 'fs'
+
+function getPython(): string {
+  const home = process.env.HOME || ''
+  const candidates = [
+    `${home}/miniconda3/envs/stock/bin/python`,
+    '/usr/local/miniconda3/envs/stock/bin/python',
+    'python3',
+    'python',
+  ]
+  return candidates.find(p => { try { return p.startsWith('/') && fs.existsSync(p) } catch { return false } })
+    ?? 'python'
+}
 
 export interface RunResult {
   success: boolean
@@ -10,7 +23,7 @@ export interface RunResult {
 export function runPythonScript(scriptName: string, args: string[] = []): Promise<RunResult> {
   return new Promise((resolve) => {
     const scriptPath = path.join(process.cwd(), 'ml', scriptName)
-    const proc = spawn('python', [scriptPath, ...args], {
+    const proc = spawn(getPython(), [scriptPath, ...args], {
       cwd: process.cwd(),
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
     })
@@ -46,7 +59,7 @@ export function streamPythonScript(
 ): Promise<RunResult> {
   return new Promise((resolve) => {
     const scriptPath = path.join(process.cwd(), 'ml', scriptName)
-    const proc = spawn('python', [scriptPath, ...args], {
+    const proc = spawn(getPython(), [scriptPath, ...args], {
       cwd: process.cwd(),
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
     })
