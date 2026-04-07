@@ -204,7 +204,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
     if (prices.length > 0) {
       const last = prices[prices.length - 1].date
-      const from = prices[Math.max(0, prices.length - 7)].date
+      const from = prices[Math.max(0, prices.length - 60)].date
       allCharts.forEach(c => c.timeScale().setVisibleRange({ from, to: last }))
     } else {
       priceChart.timeScale().fitContent()
