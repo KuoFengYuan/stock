@@ -517,6 +517,38 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
         reasons.append(f"⚠ 法人近10日同步賣超（外資 -{_chip_str(foreign_10d)} 投信 -{_chip_str(trust_10d)}）")
         score -= 0.03
 
+    # 連續買賣超（即使 60 日淨買，近期連續賣也要提醒）
+    f_consec_sell = tech.get("foreign_consec_sell", 0)
+    t_consec_sell = tech.get("trust_consec_sell", 0)
+    f_consec_buy = tech.get("foreign_consec_buy", 0)
+    t_consec_buy = tech.get("trust_consec_buy", 0)
+
+    if f_consec_sell >= 5:
+        reasons.append(f"⚠ 外資連續賣超 {f_consec_sell} 日")
+        score -= 0.02
+    elif f_consec_sell >= 3:
+        reasons.append(f"⚠ 外資連續賣超 {f_consec_sell} 日")
+        score -= 0.01
+    elif f_consec_buy >= 5:
+        reasons.append(f"外資連續買超 {f_consec_buy} 日")
+        score += 0.02
+    elif f_consec_buy >= 3:
+        reasons.append(f"外資連續買超 {f_consec_buy} 日")
+        score += 0.01
+
+    if t_consec_sell >= 5:
+        reasons.append(f"⚠ 投信連續賣超 {t_consec_sell} 日")
+        score -= 0.02
+    elif t_consec_sell >= 3:
+        reasons.append(f"⚠ 投信連續賣超 {t_consec_sell} 日")
+        score -= 0.01
+    elif t_consec_buy >= 5:
+        reasons.append(f"投信連續買超 {t_consec_buy} 日")
+        score += 0.02
+    elif t_consec_buy >= 3:
+        reasons.append(f"投信連續買超 {t_consec_buy} 日")
+        score += 0.01
+
     dealer_10d = tech.get("dealer_net_10d")
     if dealer_10d is not None and abs(dealer_10d) > CHIP_MIN_ABS:
         if dealer_10d > CHIP_MIN_ABS * 5:
@@ -762,6 +794,33 @@ def run_rule_engine():
                 tech["foreign_net_10d"] = sum(r["foreign_net"] or 0 for r in inst_rows[:10])
                 tech["trust_net_10d"]   = sum(r["trust_net"]   or 0 for r in inst_rows[:10])
                 tech["dealer_net_10d"]  = sum(r["dealer_net"]  or 0 for r in inst_rows[:10])
+                # 連續買賣超天數
+                f_consec_sell, t_consec_sell = 0, 0
+                f_consec_buy, t_consec_buy = 0, 0
+                for r in inst_rows:
+                    if (r["foreign_net"] or 0) < 0:
+                        f_consec_sell += 1
+                    else:
+                        break
+                for r in inst_rows:
+                    if (r["foreign_net"] or 0) > 0:
+                        f_consec_buy += 1
+                    else:
+                        break
+                for r in inst_rows:
+                    if (r["trust_net"] or 0) < 0:
+                        t_consec_sell += 1
+                    else:
+                        break
+                for r in inst_rows:
+                    if (r["trust_net"] or 0) > 0:
+                        t_consec_buy += 1
+                    else:
+                        break
+                tech["foreign_consec_sell"] = f_consec_sell
+                tech["trust_consec_sell"] = t_consec_sell
+                tech["foreign_consec_buy"] = f_consec_buy
+                tech["trust_consec_buy"] = t_consec_buy
 
             # 融資融券
             margin_rows = conn.execute(
