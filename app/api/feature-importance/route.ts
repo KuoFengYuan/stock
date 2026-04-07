@@ -26,6 +26,7 @@ print(json.dumps(result))
       '/opt/homebrew/Caskroom/miniconda/base/bin/conda',
       '/usr/local/miniconda3/bin/conda',
       `${process.env.HOME}/miniconda3/bin/conda`,
+      `${process.env.HOME}/miniconda3/condabin/conda`,
       'C:\\Users\\Will\\miniconda3\\Scripts\\conda.exe',
     ].filter(Boolean) as string[]
 
