@@ -62,17 +62,6 @@ export async function POST(req: NextRequest) {
         }
       })
 
-      // 成功後跑規則分析
-      if (syncSuccess) {
-        send({ type: 'line', text: '--- 規則分析 ---' })
-        let ruleOutput = ''
-        await streamPythonScript('rule_engine.py', [], (line) => {
-          ruleOutput += line + '\n'
-          send({ type: 'line', text: line })
-        })
-        syncOutput += '\n--- 規則分析 ---\n' + ruleOutput
-      }
-
       send({ type: 'done', success: syncSuccess, skippedFinancials })
       controller.close()
     },
