@@ -24,6 +24,21 @@ import yfinance as yf
 
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 
+
+def _retry_get(session, url, timeout=15, retries=2, delay=3, label="API"):
+    """帶 retry 的 GET 請求"""
+    for attempt in range(retries + 1):
+        try:
+            r = session.get(url, timeout=timeout)
+            return r
+        except Exception as e:
+            if attempt < retries:
+                print(f"  [{label} ERROR] {e}，{delay}秒後重試({attempt+1}/{retries})...", flush=True)
+                time.sleep(delay)
+            else:
+                print(f"  [{label} FAILED] {e}", flush=True)
+                return None
+
 from stock_list import ALL_STOCKS as _ALL_STOCKS_RAW, _DYNAMIC_NAMES
 from tw_names import TW_NAMES
 
@@ -169,12 +184,13 @@ def _tpex_date_str(d: date) -> str:
 def fetch_twse_day(target_date: date) -> dict[str, dict]:
     """抓 TWSE 某日全部上市股票收盤資料，回傳 {code: {open,high,low,close,volume}}"""
     url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json&date={_twse_date_str(target_date)}"
+    r = _retry_get(SESSION, url, label="TWSE 日K")
+    if not r:
+        return {}
     try:
-        r = SESSION.get(url, timeout=15)
         data = r.json()
         if data.get("stat") != "OK":
             return {}
-        # fields: 證券代號,證券名稱,成交股數,成交金額,開盤價,最高價,最低價,收盤價,漲跌價差,成交筆數
         result = {}
         for row in data.get("data", []):
             code = row[0].strip()
@@ -191,15 +207,17 @@ def fetch_twse_day(target_date: date) -> dict[str, dict]:
                 pass
         return result
     except Exception as e:
-        print(f"  [TWSE ERROR] {e}", flush=True)
+        print(f"  [TWSE 日K parse ERROR] {e}", flush=True)
         return {}
 
 
 def fetch_tpex_day(target_date: date) -> dict[str, dict]:
     """抓 TPEX 某日全部上櫃股票收盤資料"""
     url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={_tpex_date_str(target_date)}"
+    r = _retry_get(SESSION, url, label="TPEX 日K")
+    if not r:
+        return {}
     try:
-        r = SESSION.get(url, timeout=15)
         data = r.json()
         tables = data.get("tables", [])
         if not tables:
@@ -224,7 +242,7 @@ def fetch_tpex_day(target_date: date) -> dict[str, dict]:
                 pass
         return result
     except Exception as e:
-        print(f"  [TPEX ERROR] {e}", flush=True)
+        print(f"  [TPEX parse ERROR] {e}", flush=True)
         return {}
 
 
@@ -506,20 +524,13 @@ def _get_val(df, col, keys):
 def fetch_twse_institutional(target_date: date) -> dict[str, dict]:
     """TWSE 三大法人買賣超（外資、投信、自營商）"""
     url = f"https://www.twse.com.tw/fund/T86?response=json&date={_twse_date_str(target_date)}&selectType=ALLBUT0999"
+    r = _retry_get(SESSION, url, label="TWSE 三大法人")
+    if not r:
+        return {}
     try:
-        r = SESSION.get(url, timeout=15)
         data = r.json()
         if data.get("stat") != "OK":
             return {}
-        # 19 欄位順序（實測）：
-        # [0]代號 [1]名稱
-        # [2-4]  外資(不含陸資) 買/賣/淨
-        # [5-7]  外資(含陸資)   買/賣/淨
-        # [8-10] 投信           買/賣/淨
-        # [11]   自營合計淨買
-        # [12-14] 自營(自行)    買/賣/淨
-        # [15-17] 自營(避險)    買/賣/淨
-        # [18]   三大法人合計淨買
         result = {}
         for row in data.get("data", []):
             code = row[0].strip()
@@ -537,32 +548,8 @@ def fetch_twse_institutional(target_date: date) -> dict[str, dict]:
                 pass
         return result
     except Exception as e:
-        print(f"  [TWSE 三大法人 ERROR] {e}，5秒後重試...", flush=True)
-        time.sleep(5)
-        try:
-            r = SESSION.get(url, timeout=20)
-            data = r.json()
-            if data.get("stat") != "OK":
-                return {}
-            result = {}
-            for row in data.get("data", []):
-                code = row[0].strip()
-                if code not in TSE_SYMBOLS:
-                    continue
-                try:
-                    def _n(s): return int(s.replace(",", "").replace(" ", "") or 0)
-                    result[code] = {
-                        "foreign_net": _n(row[4]),
-                        "trust_net":   _n(row[10]),
-                        "dealer_net":  _n(row[11]),
-                        "total_net":   _n(row[18]),
-                    }
-                except Exception:
-                    pass
-            return result
-        except Exception as e2:
-            print(f"  [TWSE 三大法人 RETRY FAILED] {e2}", flush=True)
-            return {}
+        print(f"  [TWSE 三大法人 parse ERROR] {e}", flush=True)
+        return {}
 
 
 def fetch_tpex_institutional(target_date: date) -> dict[str, dict]:
@@ -609,14 +596,14 @@ def fetch_tpex_institutional(target_date: date) -> dict[str, dict]:
 def fetch_twse_margin(target_date: date) -> dict[str, dict]:
     """TWSE 個股融資融券餘額"""
     url = f"https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json&date={_twse_date_str(target_date)}&selectType=ALL"
+    r = _retry_get(SESSION, url, label="TWSE 融資券")
+    if not r:
+        return {}
     try:
-        r = SESSION.get(url, timeout=15)
         data = r.json()
         tables = data.get("tables", [])
-        # table[1] = 個股明細
         if len(tables) < 2:
             return {}
-        # fields: 代號,名稱, 融資買進,融資賣出,融資現償,融資餘額,融資前日餘額, 融券買進,融券賣出,融券現券,融券餘額,融券前日餘額, ...
         result = {}
         for row in tables[1].get("data", []):
             code = row[0].strip()
@@ -636,7 +623,7 @@ def fetch_twse_margin(target_date: date) -> dict[str, dict]:
                 pass
         return result
     except Exception as e:
-        print(f"  [TWSE 融資券 ERROR] {e}", flush=True)
+        print(f"  [TWSE 融資券 parse ERROR] {e}", flush=True)
         return {}
 
 
@@ -729,6 +716,8 @@ def sync_chips(conn):
                 except Exception:
                     pass
 
+            conn.commit()  # 每天 commit，crash 不丟整批
+
             if day_inst > 0 or day_margin > 0:
                 print(f"  {date_str}: 法人 {day_inst} 檔, 融資券 {day_margin} 檔", flush=True)
             else:
@@ -737,7 +726,6 @@ def sync_chips(conn):
             inst_total += day_inst
             margin_total += day_margin
 
-        conn.commit()
         time.sleep(1)  # 批次間休息
 
     log_sync(conn, "chips", "success", inst_total + margin_total, started_at=started_at)
@@ -747,11 +735,11 @@ def sync_chips(conn):
 
 def _fetch_monthly_revenue_finmind(code: str, start_date: str) -> list[dict]:
     """用 FinMind API 抓單一股票月營收。回傳 [{year, month, revenue}, ...]"""
+    url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMonthRevenue&data_id={code}&start_date={start_date}"
+    r = _retry_get(SESSION, url, timeout=10, retries=1, delay=2, label=f"FinMind {code}")
+    if not r:
+        return []
     try:
-        r = SESSION.get(
-            f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMonthRevenue&data_id={code}&start_date={start_date}",
-            timeout=10
-        )
         j = r.json()
         if j.get("status") != 200:
             return []
@@ -762,7 +750,7 @@ def _fetch_monthly_revenue_finmind(code: str, start_date: str) -> list[dict]:
                 result.append({
                     "year": d["revenue_year"],
                     "month": d["revenue_month"],
-                    "revenue": float(rev),  # 單位：元
+                    "revenue": float(rev),
                 })
         return result
     except Exception:
