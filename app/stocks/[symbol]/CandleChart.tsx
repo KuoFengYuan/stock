@@ -233,14 +233,17 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
     let rafId = 0
     let pendingPos: number | null = null
+    let lastAppliedPos: number | null = null
 
     function applyScroll(newPos: number) {
+      if (lastAppliedPos !== null && Math.abs(newPos - lastAppliedPos) < 0.01) return
       pendingPos = newPos
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           if (pendingPos !== null) {
             allCharts.forEach(c => c.timeScale().scrollToPosition(pendingPos!, false))
             resetBarSpacing()
+            lastAppliedPos = pendingPos
           }
           rafId = 0
           pendingPos = null
