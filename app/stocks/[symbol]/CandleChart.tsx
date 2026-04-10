@@ -231,12 +231,27 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       return { left: maxLeftScroll, right: rightBound }
     }
 
+    let rafId = 0
+    let pendingPos: number | null = null
+
+    function applyScroll(newPos: number) {
+      pendingPos = newPos
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          if (pendingPos !== null) {
+            allCharts.forEach(c => c.timeScale().scrollToPosition(pendingPos!, false))
+            resetBarSpacing()
+          }
+          rafId = 0
+          pendingPos = null
+        })
+      }
+    }
+
     function clampScroll(delta: number) {
       const pos = priceChart.timeScale().scrollPosition()
       const bounds = getScrollBounds()
-      const newPos = Math.max(bounds.left, Math.min(bounds.right, pos + delta))
-      allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
-      resetBarSpacing()
+      applyScroll(Math.max(bounds.left, Math.min(bounds.right, pos + delta)))
     }
 
     // 滾輪
@@ -255,9 +270,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       const dx = e.clientX - dragStartX
       const barDelta = dx / 8
       const bounds = getScrollBounds()
-      const newPos = Math.max(bounds.left, Math.min(bounds.right, dragStartPos + barDelta))
-      allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
-      resetBarSpacing()
+      applyScroll(Math.max(bounds.left, Math.min(bounds.right, dragStartPos + barDelta)))
     }
     const mouseUp = () => { dragging = false }
 
@@ -270,9 +283,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       const dx = e.touches[0].clientX - touchStartX
       const barDelta = dx / 8
       const bounds = getScrollBounds()
-      const newPos = Math.max(bounds.left, Math.min(bounds.right, touchStartPos + barDelta))
-      allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
-      resetBarSpacing()
+      applyScroll(Math.max(bounds.left, Math.min(bounds.right, touchStartPos + barDelta)))
     }
 
     containers.forEach(el => {
@@ -293,6 +304,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       })
       document.removeEventListener('mousemove', mouseMove)
       document.removeEventListener('mouseup', mouseUp)
+      if (rafId) cancelAnimationFrame(rafId)
       chartsRef.current.forEach(c => c.remove())
       chartsRef.current = []
     }
