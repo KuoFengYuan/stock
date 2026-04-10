@@ -189,13 +189,14 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     }
 
     // 雙向同步時間軸（用實際時間範圍，不用 logical index 避免資料量不同錯位）
+    // 同步所有圖表的時間軸（用 visibleRange 而非 scrollPosition，確保日期對齊）
     let syncing = false
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     function syncFrom(source: IChartApi, targets: (IChartApi | null)[]) {
       source.timeScale().subscribeVisibleTimeRangeChange((range: any) => {
         if (syncing || !range) return
         syncing = true
-        targets.forEach(t => t?.timeScale().setVisibleRange(range))
+        targets.forEach(t => { try { t?.timeScale().setVisibleRange(range) } catch {} })
         syncing = false
       })
     }
@@ -220,10 +221,6 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     const visibleBars = 60
     const maxLeftScroll = -(prices.length - visibleBars)
 
-    function resetBarSpacing() {
-      allCharts.forEach(c => c.timeScale().applyOptions({ barSpacing: 8 }))
-    }
-
     function getScrollBounds() {
       // scrollPosition: 正數=最新K棒右邊有空白，負數=往左捲了
       // 右邊界：允許捲到最新K棒（正數方向不限死在0，用初始位置為上限）
@@ -244,8 +241,11 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           if (pendingPos !== null) {
-            allCharts.forEach(c => c.timeScale().scrollToPosition(pendingPos!, false))
-            if (!atEdge) resetBarSpacing()
+            // 只移動 priceChart，syncFrom 會自動同步其他圖表的 visibleRange
+            priceChart.timeScale().scrollToPosition(pendingPos!, false)
+            if (!atEdge) {
+              priceChart.timeScale().applyOptions({ barSpacing: 8 })
+            }
             lastAppliedPos = pendingPos
           }
           rafId = 0
