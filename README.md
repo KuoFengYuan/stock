@@ -15,12 +15,12 @@ app/                              # Next.js App Router 前端
   page.tsx                        # 首頁：推薦清單 + 同步/分析按鈕 + SSE 進度條
   stocks/[symbol]/                # 個股頁：K 線圖 + 法人籌碼 + 新聞
     CandleChart.tsx               # lightweight-charts 多面板圖表（K線/量/外資/投信）
-  model/page.tsx                  # 模型頁（特徵重要度）
   settings/page.tsx               # 設定頁（訓練、回測、篩選條件）
   api/
     sync/route.ts                 # POST → SSE 串流，呼叫 ml/sync.py
+    sync-status/route.ts          # GET → 各資料類型最後同步時間
     analyze/route.ts              # POST → 呼叫 rule_engine.py 或 predict.py
-    recommendations/route.ts      # GET → 推薦清單（分頁 + 篩選）
+    recommendations/route.ts      # GET → 推薦清單（分頁 + 篩選 + 價格 fallback）
     stocks/[symbol]/route.ts      # GET → 個股價格 + 法人 + 財報
     stocks/[symbol]/news/route.ts # GET → 個股新聞
     feature-importance/route.ts   # GET → ML 特徵重要度
@@ -57,7 +57,8 @@ TWSE API            yfinance          FinMind API
        └────────────────┴─────────────────┘
                         │
                   ml/sync.py
-          (價格 120 workers / 籌碼 5 workers 並行)
+       (增量：全市場日API / 歷史：120 workers 並行)
+       (籌碼：10天批次×2併發 / 指數退避重試)
                         │
                   SQLite stock.db
                         │
@@ -151,7 +152,7 @@ watch_thresh = 0.50 + (market_win_rate - 0.50) × 0.30
 
 | 資料 | 來源 | 單位 | 更新頻率 |
 |------|------|------|---------|
-| 日 K 線 | TWSE 個股月 API | 張（股÷1000） | 每日 |
+| 日 K 線 | TWSE 全市場日 API（增量）/ 個股月 API（歷史） | 張（股÷1000） | 每日 |
 | 三大法人 | TWSE T86 API | 股（DB 原值） | 每日 |
 | 融資融券 | TWSE MI_MARGN API | 張 | 每日 |
 | 季度財報 | yfinance | 元 | 每季 |
@@ -182,19 +183,18 @@ watch_thresh = 0.50 + (market_win_rate - 0.50) × 0.30
 ### 首頁（`/`）
 - 推薦清單：代號、名稱、市場、收盤價、漲跌幅、成交量、評分條、訊號標籤、推薦理由
 - AI 概念股標籤（紫色）+ 子分類
-- 同步資料（SSE 即時進度條）/ 規則分析 / AI 分析
-- 篩選：全部 / 買入 / 觀察 / 中立
+- 同步資料（SSE 進度條 + ETA 預估）/ 規則分析 / AI 分析
+- 篩選：訊號（全部/買入/觀察/中立） + AI 主題下拉選單
+- 表格排序：收盤價 / 漲跌幅 / 成交量 / 評分
+- 最後同步時間顯示
 
 ### 個股頁（`/stocks/[symbol]`）
-- K 線圖：紅漲綠跌，OHLC + 漲跌幅 tooltip，固定 bar 寬度、左右拖曳/滾輪平移
+- K 線圖：紅漲綠跌，OHLC + 量 + 外資 + 投信整合 tooltip，固定 bar 寬度
 - 均線：MA5（黃）/ MA10（橙）/ MA20（青）/ MA60（紫），可切換
-- 成交量柱狀圖
-- 外資買賣超柱狀圖（藍/粉）+ 投信買賣超柱狀圖（綠/橙）
-- 最新新聞
-- 季度財務表（近 8 季）
-
-### 模型頁（`/model`）
-- 模型 AUC、特徵重要度排名
+- 成交量 / 外資買賣超 / 投信買賣超柱狀圖（時間軸對齊）
+- 初始顯示一年（250 交易日）
+- 右側面板：季度財務 + 最新新聞
+- Skeleton loading（載入中骨架屏）
 
 ### 設定頁（`/settings`）
 - 模型狀態 + 重新訓練 / 規則回測
@@ -237,7 +237,7 @@ conda run -n stock python3 -m pytest ml/tests/ -v
 
 ### 首次使用
 
-1. **同步資料**（首次約 10–30 分鐘，價格 120 workers + 籌碼 5 workers 並行）
+1. **同步資料**（首次約 10–30 分鐘；增量同步用全市場 API 秒級完成）
 2. **規則分析**（產生推薦清單）
 3. 設定頁 → **訓練模型**（需 >= 200 筆有效資料）
 4. **AI 分析**（ML + 規則混合推薦）
@@ -255,6 +255,6 @@ conda run -n stock python3 -m pytest ml/tests/ -v
 | ML | XGBoost 2.1 + scikit-learn + pandas-ta |
 | 策略 | Piotroski F-Score + PEG Ratio + Minervini SEPA |
 | 資料來源 | TWSE、yfinance、MOPS、FinMind |
-| 並行 | ThreadPoolExecutor（價格 120 workers、籌碼 5 workers、財報 20 workers） |
+| 並行 | ThreadPoolExecutor（歷史價格 120 workers、籌碼 10×2 workers、財報 20 workers） |
 | 測試 | pytest（41 tests）+ Claude Code hook 自動觸發 |
 | 部署 | GCP VM + nginx + Let's Encrypt SSL |

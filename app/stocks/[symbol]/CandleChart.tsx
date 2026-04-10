@@ -40,14 +40,10 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
   const chartsRef = useRef<IChartApi[]>([])
   const maSeriesRef = useRef<Record<number, ISeriesApi<'Line'>>>({})
 
-  // Crosshair tooltip state (K 棒 OHLC)
+  // Crosshair tooltip state (K 棒 OHLC + 法人)
   const [priceTooltip, setPriceTooltip] = useState<{
     x: number; date: string; open: number; high: number; low: number; close: number; volume: number; up: boolean; changePct: number | null
-  } | null>(null)
-
-  // Tooltip state
-  const [instTooltip, setInstTooltip] = useState<{
-    x: number; y: number; date: string; foreign: number; trust: number
+    foreign: number | null; trust: number | null
   } | null>(null)
 
   // Build a date → price map for crosshair tooltip
@@ -70,7 +66,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     if (!priceRef.current || !volRef.current) return
 
     const common = {
-      layout: { background: { type: ColorType.Solid, color: '#1e293b' }, textColor: '#94a3b8' },
+      layout: { background: { type: ColorType.Solid, color: '#1e293b' }, textColor: '#94a3b8', attributionLogo: false },
       grid: { vertLines: { color: '#334155' }, horzLines: { color: '#334155' } },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: '#475569' },
@@ -80,7 +76,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     }
 
     // ── K 線圖 ──
-    const priceChart = createChart(priceRef.current, { ...common, height: 340 })
+    const priceChart = createChart(priceRef.current, { ...common, height: 260 })
     const candleSeries = priceChart.addSeries(CandlestickSeries, {
       upColor: '#ef4444', downColor: '#22c55e',
       borderUpColor: '#ef4444', borderDownColor: '#22c55e',
@@ -99,7 +95,10 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       const idx = priceIdxMapRef.current.get(date) ?? -1
       const prevClose = idx > 0 ? prices[idx - 1].close : null
       const changePct = prevClose ? (row.close - prevClose) / prevClose * 100 : null
-      setPriceTooltip({ x, date, open: row.open, high: row.high, low: row.low, close: row.close, volume: row.volume, up: row.close >= row.open, changePct })
+      const inst = instMapRef.current.get(date)
+      const foreign = inst ? Math.round(inst.foreign_net / 1000) : null
+      const trust = inst ? Math.round(inst.trust_net / 1000) : null
+      setPriceTooltip({ x, date, open: row.open, high: row.high, low: row.low, close: row.close, volume: row.volume, up: row.close >= row.open, changePct, foreign, trust })
     })
 
     const maRefs: Record<number, ISeriesApi<'Line'>> = {}
@@ -116,9 +115,10 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     onMaSeriesReady(maRefs)
 
     // ── 成交量 ──
-    const volChart = createChart(volRef.current!, { ...common, height: 80 })
+    const volChart = createChart(volRef.current!, { ...common, height: 60 })
     const volSeries = volChart.addSeries(HistogramSeries, {
       priceFormat: { type: 'custom', formatter: (v: number) => Math.round(v).toLocaleString() },
+      lastValueVisible: false, priceLineVisible: false,
     })
     volSeries.setData(prices.map((p, i) => ({
       time: p.date, value: p.volume,
@@ -127,65 +127,32 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
     const allCharts: IChartApi[] = [priceChart, volChart]
 
+    // 對齊時間軸：用 prices 日期補齊 institutional 缺漏的日期（填 0）
+    const instByDate = new Map(institutional.map(d => [d.date, d]))
+    const alignedInst = prices.map(p => instByDate.get(p.date) ?? { date: p.date, foreign_net: 0, trust_net: 0, dealer_net: 0, total_net: 0 })
+
     // ── 外資 ──
     let foreignChart: IChartApi | null = null
     if (institutional.length > 0 && foreignRef.current) {
-      foreignChart = createChart(foreignRef.current, { ...common, height: 90 })
-      const foreignSeries = foreignChart.addSeries(HistogramSeries, { base: 0 })
-      foreignSeries.setData(institutional.map(d => ({
+      foreignChart = createChart(foreignRef.current, { ...common, height: 70 })
+      const foreignSeries = foreignChart.addSeries(HistogramSeries, { base: 0, lastValueVisible: false, priceLineVisible: false })
+      foreignSeries.setData(alignedInst.map(d => ({
         time: d.date, value: Math.round(d.foreign_net / 1000),
         color: d.foreign_net >= 0 ? '#60a5fa' : '#f472b6',
       })))
       allCharts.push(foreignChart)
-
-      // Tooltip on crosshair move
-      foreignChart.subscribeCrosshairMove(param => {
-        if (!param.time || !param.sourceEvent) {
-          setInstTooltip(null)
-          return
-        }
-        const date = param.time as string
-        const row = instMapRef.current.get(date)
-        if (!row) { setInstTooltip(null); return }
-        const rect = foreignRef.current!.getBoundingClientRect()
-        setInstTooltip({
-          x: (param.sourceEvent as unknown as MouseEvent).clientX - rect.left,
-          y: 0,
-          date,
-          foreign: Math.round(row.foreign_net / 1000),
-          trust: Math.round(row.trust_net / 1000),
-        })
-      })
     }
 
     // ── 投信 ──
     let trustChart: IChartApi | null = null
     if (institutional.length > 0 && trustRef.current) {
-      trustChart = createChart(trustRef.current, { ...common, height: 90 })
-      const trustSeries = trustChart.addSeries(HistogramSeries, { base: 0 })
-      trustSeries.setData(institutional.map(d => ({
+      trustChart = createChart(trustRef.current, { ...common, height: 70 })
+      const trustSeries = trustChart.addSeries(HistogramSeries, { base: 0, lastValueVisible: false, priceLineVisible: false })
+      trustSeries.setData(alignedInst.map(d => ({
         time: d.date, value: Math.round(d.trust_net / 1000),
         color: d.trust_net >= 0 ? '#34d399' : '#fb923c',
       })))
       allCharts.push(trustChart)
-
-      trustChart.subscribeCrosshairMove(param => {
-        if (!param.time || !param.sourceEvent) {
-          setInstTooltip(null)
-          return
-        }
-        const date = param.time as string
-        const row = instMapRef.current.get(date)
-        if (!row) { setInstTooltip(null); return }
-        const rect = trustRef.current!.getBoundingClientRect()
-        setInstTooltip({
-          x: (param.sourceEvent as unknown as MouseEvent).clientX - rect.left,
-          y: 0,
-          date,
-          foreign: Math.round(row.foreign_net / 1000),
-          trust: Math.round(row.trust_net / 1000),
-        })
-      })
     }
 
     // 雙向同步時間軸（用實際時間範圍，不用 logical index 避免資料量不同錯位）
@@ -207,7 +174,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
     if (prices.length > 0) {
       const last = prices[prices.length - 1].date
-      const from = prices[Math.max(0, prices.length - 60)].date
+      const from = prices[Math.max(0, prices.length - 250)].date
       allCharts.forEach(c => c.timeScale().setVisibleRange({ from, to: last }))
     } else {
       priceChart.timeScale().fitContent()
@@ -218,34 +185,36 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
     // 自訂滾動：滾輪 + 滑鼠拖曳 + 觸控拖曳
     const containers = [priceRef.current, volRef.current, foreignRef.current, trustRef.current].filter(Boolean) as HTMLDivElement[]
-    const visibleBars = 60
+    const visibleBars = 250
     const maxLeftScroll = -(prices.length - visibleBars)
+
+    // 記錄初始 scrollPosition（setVisibleRange 後的值），作為右邊界
+    const initialPos = priceChart.timeScale().scrollPosition()
 
     function getScrollBounds() {
       // scrollPosition: 正數=最新K棒右邊有空白，負數=往左捲了
-      // 右邊界：允許捲到最新K棒（正數方向不限死在0，用初始位置為上限）
-      const rightBound = visibleBars  // 允許向右足夠空間回到最新
-      return { left: maxLeftScroll, right: rightBound }
+      // 右邊界：不超過初始位置（最新K棒在最右邊），不允許出現空白
+      return { left: maxLeftScroll, right: initialPos }
     }
 
     let rafId = 0
     let pendingPos: number | null = null
     let lastAppliedPos: number | null = null
 
+    const BAR_SPACING = 8
+
     function applyScroll(rawPos: number) {
       const bounds = getScrollBounds()
       const newPos = Math.max(bounds.left, Math.min(bounds.right, rawPos))
       if (lastAppliedPos !== null && Math.abs(newPos - lastAppliedPos) < 0.01) return
       pendingPos = newPos
-      const atEdge = newPos <= bounds.left || newPos >= bounds.right
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           if (pendingPos !== null) {
-            // 只移動 priceChart，syncFrom 會自動同步其他圖表的 visibleRange
-            priceChart.timeScale().scrollToPosition(pendingPos!, false)
-            if (!atEdge) {
-              priceChart.timeScale().applyOptions({ barSpacing: 8 })
-            }
+            allCharts.forEach(c => {
+              c.timeScale().scrollToPosition(pendingPos!, false)
+              c.timeScale().applyOptions({ barSpacing: BAR_SPACING })
+            })
             lastAppliedPos = pendingPos
           }
           rafId = 0
@@ -336,6 +305,12 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
               <span className="text-slate-500">低</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.low.toFixed(2)}</span>
               <span className="text-slate-500">收</span><span style={{ color: priceTooltip.up ? '#ef4444' : '#22c55e' }}>{priceTooltip.close.toFixed(2)}</span>
               <span className="text-slate-500">量</span><span className="text-slate-400">{priceTooltip.volume.toLocaleString()}</span>
+              {priceTooltip.foreign != null && (
+                <><span className="text-slate-500">外資</span><span style={{ color: priceTooltip.foreign >= 0 ? '#60a5fa' : '#f472b6' }}>{priceTooltip.foreign >= 0 ? '+' : ''}{fmt(priceTooltip.foreign)}</span></>
+              )}
+              {priceTooltip.trust != null && (
+                <><span className="text-slate-500">投信</span><span style={{ color: priceTooltip.trust >= 0 ? '#34d399' : '#fb923c' }}>{priceTooltip.trust >= 0 ? '+' : ''}{fmt(priceTooltip.trust)}</span></>
+              )}
             </div>
           </div>
         )}
@@ -350,27 +325,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
             <span className="w-2 h-2 rounded-sm inline-block" style={{ background: '#60a5fa' }} />
             <span className="text-slate-300">外資買賣超（張）</span>
           </div>
-          <div ref={foreignRef} className="w-full relative">
-            {instTooltip && (
-              <div
-                className="absolute z-10 pointer-events-none px-2 py-1.5 rounded text-xs whitespace-nowrap"
-                style={{
-                  left: Math.min(instTooltip.x + 12, (foreignRef.current?.clientWidth ?? 400) - 160),
-                  top: 8,
-                  background: '#0f172a',
-                  border: '1px solid #475569',
-                }}
-              >
-                <div className="text-slate-400 mb-1">{instTooltip.date}</div>
-                <div style={{ color: instTooltip.foreign >= 0 ? '#60a5fa' : '#f472b6' }}>
-                  外資：{instTooltip.foreign >= 0 ? '+' : ''}{fmt(instTooltip.foreign)} 張
-                </div>
-                <div style={{ color: instTooltip.trust >= 0 ? '#34d399' : '#fb923c' }}>
-                  投信：{instTooltip.trust >= 0 ? '+' : ''}{fmt(instTooltip.trust)} 張
-                </div>
-              </div>
-            )}
-          </div>
+          <div ref={foreignRef} className="w-full" />
 
           {/* 投信 */}
           <div className="mt-1 px-1 flex items-center gap-2 text-xs">

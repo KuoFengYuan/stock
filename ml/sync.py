@@ -260,8 +260,8 @@ def _insert_day(conn, symbol: str, date_str: str, p: dict) -> bool:
 def sync_prices(conn):
     """
     同步策略：
-    1. 若 DB 無資料 → 用 yfinance 初始化近2年歷史
-    2. 找出尚缺的交易日（DB 最新日期到今天）→ 用 TWSE+TPEX 補齊
+    1. 若 DB 覆蓋率不足 → 用個股月 API 批量補齊歷史
+    2. 增量更新 → 用全市場日 API（一次抓全部股票某天資料），速度快很多
     """
     started_at = int(time.time() * 1000)
     total = 0
@@ -269,28 +269,52 @@ def sync_prices(conn):
     row = conn.execute("SELECT MAX(date) FROM stock_prices").fetchone()
     latest_in_db = row[0] if row and row[0] else None
 
-    # 計算有足夠資料（>=120筆）的股票數
     covered = conn.execute(
         "SELECT COUNT(*) FROM (SELECT symbol, COUNT(*) as c FROM stock_prices GROUP BY symbol HAVING c >= 120)"
     ).fetchone()[0]
-    need_bulk = not latest_in_db or covered < len(ALL_STOCKS) * 0.5  # 覆蓋率不足50%就補
+    need_bulk = not latest_in_db or covered < len(ALL_STOCKS) * 0.5
 
-    # ── 步驟1 + 步驟2：用 TWSE+TPEX 官方 API 補齊所有缺少的日期（歷史 + 近期）──
     if need_bulk:
-        print(f"歷史資料不足（{covered}/{len(ALL_STOCKS)} 檔），用 TWSE+TPEX 官方 API 補齊近2年...", flush=True)
+        # 歷史補齊：逐股逐月抓
+        print(f"歷史資料不足（{covered}/{len(ALL_STOCKS)} 檔），補齊近2年...", flush=True)
         hist_start = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
+        total += _twse_tpex_history_bulk(conn, hist_start)
     elif latest_in_db:
-        hist_start = latest_in_db  # 從最後日期往後補
-    else:
-        hist_start = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
+        # 增量更新：用全市場日 API，一天一個 request 抓全部股票
+        today = date.today()
+        start = datetime.strptime(latest_in_db, "%Y-%m-%d").date() + timedelta(days=1)
+        days_to_fetch = [start + timedelta(days=i) for i in range((today - start).days + 1)]
+        days_to_fetch = [d for d in days_to_fetch if d.weekday() < 5]
 
-    total += _twse_tpex_history_bulk(conn, hist_start)
-    row = conn.execute("SELECT MAX(date) FROM stock_prices").fetchone()
-    latest_in_db = row[0] if row and row[0] else None
-
-    if not need_bulk and latest_in_db:
-        # 已是最新
-        pass
+        if days_to_fetch:
+            print(f"增量同步 {len(days_to_fetch)} 天（全市場日 API）...", flush=True)
+            print(f"@PROGRESS|prices|0|{len(days_to_fetch)}", flush=True)
+            for i, d in enumerate(days_to_fetch):
+                twse_data = fetch_twse_day(d)
+                if twse_data:
+                    date_str = d.strftime("%Y-%m-%d")
+                    batch = []
+                    for code, p in twse_data.items():
+                        symbol = TSE_SYMBOLS.get(code)
+                        if symbol:
+                            batch.append((symbol, date_str, p["open"], p["high"], p["low"], p["close"], p["volume"], p["close"]))
+                    if batch:
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
+                            batch
+                        )
+                        conn.commit()
+                        total += len(batch)
+                        print(f"  {date_str}: {len(batch)} 檔", flush=True)
+                    else:
+                        print(f"  {date_str}: 休市或無資料", flush=True)
+                else:
+                    print(f"  {d.strftime('%Y-%m-%d')}: 休市或無資料", flush=True)
+                print(f"@PROGRESS|prices|{i+1}|{len(days_to_fetch)}", flush=True)
+                if i < len(days_to_fetch) - 1:
+                    time.sleep(0.3)
+        else:
+            print("價格資料已是最新", flush=True)
 
     log_sync(conn, "prices", "success", total, started_at=started_at)
     print(f"價格同步完成，共新增 {total} 筆", flush=True)

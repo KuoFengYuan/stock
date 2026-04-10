@@ -66,16 +66,24 @@ export async function GET(req: NextRequest) {
 
   const rows = db.prepare(
     `SELECT r.symbol, s.name, s.market, r.score, r.signal,
-            p.close, p.volume, r.reasons_json,
+            COALESCE(p.close, latest.close) as close,
+            COALESCE(p.volume, latest.volume) as volume,
+            r.reasons_json,
             prev.close as prev_close,
             prev.date  as prev_date
      FROM recommendations r
      JOIN stocks s ON s.symbol = r.symbol
      LEFT JOIN stock_prices p ON p.symbol = r.symbol AND p.date = r.date
+     LEFT JOIN stock_prices latest ON latest.symbol = r.symbol
+       AND latest.date = (
+         SELECT date FROM stock_prices
+         WHERE symbol = r.symbol
+         ORDER BY date DESC LIMIT 1
+       )
      LEFT JOIN stock_prices prev ON prev.symbol = r.symbol
        AND prev.date = (
          SELECT date FROM stock_prices
-         WHERE symbol = r.symbol AND date < p.date
+         WHERE symbol = r.symbol AND date < COALESCE(p.date, latest.date)
          ORDER BY date DESC LIMIT 1
        )
      WHERE ${where}

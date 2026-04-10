@@ -73,27 +73,30 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
   return (
     <div className="w-full">
       {/* 頂部：返回 + 股名 + 價格，一行搞定 */}
-      <div className="flex items-center gap-2 mb-2">
+      <div className="flex items-baseline gap-2 mb-2">
         <a href="/" className="text-slate-500 hover:text-slate-300 text-xs shrink-0">←</a>
         <h1 className="text-base font-bold text-white">{displaySymbol} {data.name}</h1>
         <span className={`text-[10px] px-1 py-0.5 rounded ${data.market === 'TSE' ? 'bg-blue-900/50 text-blue-300' : 'bg-purple-900/50 text-purple-300'}`}>
           {data.market === 'TSE' ? '上市' : '上櫃'}
         </span>
         {latest && (
-          <div className="flex items-baseline gap-1.5 ml-auto">
-            <span className="text-lg font-mono font-bold text-white">{latest.close.toFixed(2)}</span>
-            <span className={`text-xs font-mono ${changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+          <>
+            <span className="text-slate-600 mx-1">|</span>
+            <span className="text-base font-mono font-bold text-white">{latest.close.toFixed(2)}</span>
+            <span className={`text-sm font-mono ${changePct >= 0 ? 'text-red-400' : 'text-green-400'}`}>
               {changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%
             </span>
-          </div>
+            <span className="text-slate-600 mx-1">|</span>
+            <span className="text-xs text-slate-400">量 <span className="font-mono">{latest.volume.toLocaleString()}</span></span>
+          </>
         )}
       </div>
 
       {/* 主體：圖表 + 右側面板 */}
-      <div className="flex flex-col lg:flex-row gap-2">
+      <div className="flex flex-col lg:flex-row gap-3">
         {/* 圖表 */}
         {data.prices.length > 0 && (
-          <div className="flex-1 min-w-0 bg-slate-800 rounded-lg p-2 overflow-hidden">
+          <div className="lg:w-[60%] xl:w-[65%] min-w-0 bg-slate-800 rounded-lg p-2 overflow-hidden">
             <div className="flex items-center gap-1.5 mb-1">
               {([5, 10, 20, 60] as const).map(p => (
                 <button
@@ -116,7 +119,7 @@ export default function StockPage({ params }: { params: Promise<{ symbol: string
         )}
 
         {/* 右側：財報 + 新聞 */}
-        <div className="lg:w-64 xl:w-72 shrink-0 flex flex-col gap-2">
+        <div className="flex-1 min-w-0 flex flex-col gap-2">
           {data.financials.length > 0 && (
             <div className="bg-slate-800 rounded-lg p-2">
               <h2 className="text-slate-500 text-[11px] font-medium mb-1">季度財務</h2>
