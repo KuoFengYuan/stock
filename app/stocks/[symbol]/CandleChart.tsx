@@ -235,14 +235,17 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     let pendingPos: number | null = null
     let lastAppliedPos: number | null = null
 
-    function applyScroll(newPos: number) {
+    function applyScroll(rawPos: number) {
+      const bounds = getScrollBounds()
+      const newPos = Math.max(bounds.left, Math.min(bounds.right, rawPos))
       if (lastAppliedPos !== null && Math.abs(newPos - lastAppliedPos) < 0.01) return
       pendingPos = newPos
+      const atEdge = newPos <= bounds.left || newPos >= bounds.right
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           if (pendingPos !== null) {
             allCharts.forEach(c => c.timeScale().scrollToPosition(pendingPos!, false))
-            resetBarSpacing()
+            if (!atEdge) resetBarSpacing()
             lastAppliedPos = pendingPos
           }
           rafId = 0
@@ -251,16 +254,11 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       }
     }
 
-    function clampScroll(delta: number) {
-      const pos = priceChart.timeScale().scrollPosition()
-      const bounds = getScrollBounds()
-      applyScroll(Math.max(bounds.left, Math.min(bounds.right, pos + delta)))
-    }
-
     // 滾輪
     const wheelHandler = (e: WheelEvent) => {
       e.preventDefault()
-      clampScroll(-Math.sign(e.deltaY) * 3)
+      const pos = priceChart.timeScale().scrollPosition()
+      applyScroll(pos - Math.sign(e.deltaY) * 3)
     }
 
     // 滑鼠拖曳
@@ -270,10 +268,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     const mouseDown = (e: MouseEvent) => { dragging = true; dragStartX = e.clientX; dragStartPos = priceChart.timeScale().scrollPosition() }
     const mouseMove = (e: MouseEvent) => {
       if (!dragging) return
-      const dx = e.clientX - dragStartX
-      const barDelta = dx / 8
-      const bounds = getScrollBounds()
-      applyScroll(Math.max(bounds.left, Math.min(bounds.right, dragStartPos + barDelta)))
+      applyScroll(dragStartPos + (e.clientX - dragStartX) / 8)
     }
     const mouseUp = () => { dragging = false }
 
@@ -283,10 +278,7 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
     const touchStart = (e: TouchEvent) => { touchStartX = e.touches[0].clientX; touchStartPos = priceChart.timeScale().scrollPosition() }
     const touchMove = (e: TouchEvent) => {
       e.preventDefault()
-      const dx = e.touches[0].clientX - touchStartX
-      const barDelta = dx / 8
-      const bounds = getScrollBounds()
-      applyScroll(Math.max(bounds.left, Math.min(bounds.right, touchStartPos + barDelta)))
+      applyScroll(touchStartPos + (e.touches[0].clientX - touchStartX) / 8)
     }
 
     containers.forEach(el => {
