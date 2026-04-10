@@ -388,6 +388,7 @@ def _twse_tpex_history_bulk(conn, start_date: str) -> int:
         print("  無需補齊歷史資料", flush=True)
         return 0
 
+    print(f"@PROGRESS|prices|0|{len(tasks)}", flush=True)
     print(f"  共 {len(tasks)} 個下載任務（{len(ALL_STOCKS)} 檔 × {len(months)} 個月）...", flush=True)
     total = 0
     batch_results = []
@@ -409,6 +410,7 @@ def _twse_tpex_history_bulk(conn, start_date: str) -> int:
             done += 1
             if done % 200 == 0 or done == len(tasks):
                 pct = done * 100 // len(tasks)
+                print(f"@PROGRESS|prices|{done}|{len(tasks)}", flush=True)
                 print(f"  下載進度 {done}/{len(tasks)} ({pct}%)，暫存 {len(batch_results)} 筆", flush=True)
             # 每累積 BATCH_SIZE 筆就先寫入，避免記憶體暴增
             if len(batch_results) >= BATCH_SIZE:
@@ -461,6 +463,7 @@ def sync_financials(conn):
     now_yq = datetime.now().year * 10 + (datetime.now().month - 1) // 3 + 1
 
     need_dl = [s for s in ALL_STOCKS if existing.get(s, 0) < now_yq]
+    print(f"@PROGRESS|financials|0|{len(need_dl)}", flush=True)
     print(f"同步財務報表，{len(need_dl)} 檔需更新...", flush=True)
 
     def _fetch_fin(symbol):
@@ -503,7 +506,26 @@ def sync_financials(conn):
                 total += len(rows)
             done += 1
             if done % 100 == 0:
+                print(f"@PROGRESS|financials|{done}|{len(need_dl)}", flush=True)
                 print(f"  財務進度 {done}/{len(need_dl)}，累計 {total} 筆", flush=True)
+
+    # 回填缺失的 EPS：用同股票其他季度的 EPS/net_income 比例推算
+    null_eps = conn.execute(
+        "SELECT symbol, year, quarter, net_income FROM financials WHERE eps IS NULL AND net_income IS NOT NULL"
+    ).fetchall()
+    filled = 0
+    for symbol, year, quarter, net_income in null_eps:
+        ref = conn.execute(
+            "SELECT eps, net_income FROM financials WHERE symbol=? AND eps IS NOT NULL AND net_income IS NOT NULL AND net_income != 0 ORDER BY ABS((year*10+quarter) - (? *10+?)) LIMIT 1",
+            (symbol, year, quarter)
+        ).fetchone()
+        if ref and ref[1] != 0:
+            estimated_eps = round(net_income * (ref[0] / ref[1]), 2)
+            conn.execute("UPDATE financials SET eps=? WHERE symbol=? AND year=? AND quarter=?", (estimated_eps, symbol, year, quarter))
+            filled += 1
+    if filled:
+        conn.commit()
+        print(f"  EPS 回填 {filled} 筆", flush=True)
 
     log_sync(conn, "financials", "success", total, started_at=started_at)
     print(f"財務報表同步完成，共 {total} 筆", flush=True)
@@ -645,49 +667,97 @@ def sync_chips(conn):
     row = conn.execute("SELECT MAX(date) FROM institutional").fetchone()
     latest_in_db = row[0] if row and row[0] else None
 
+    # 用 stock_prices 的實際交易日過濾，避免打假日的 API
+    trading_day_rows = conn.execute(
+        "SELECT DISTINCT date FROM stock_prices WHERE date >= ? ORDER BY date",
+        (price_start.strftime("%Y-%m-%d"),)
+    ).fetchall()
+    trading_days = set(r[0] for r in trading_day_rows)
+
     # 需要補的日期：前面的缺口 + 後面的增量
     dates_to_fill = []
     if inst_start and price_start < inst_start:
-        # 回填缺口
+        # 回填缺口（限定有價格資料的交易日）
         gap_dates = [price_start + timedelta(days=i) for i in range((inst_start - price_start).days)]
-        dates_to_fill += [d for d in gap_dates if d.weekday() < 5]
+        dates_to_fill += [d for d in gap_dates if d.strftime("%Y-%m-%d") in trading_days]
 
     if latest_in_db:
         start = datetime.strptime(latest_in_db, "%Y-%m-%d").date()
         new_dates = [start + timedelta(days=i) for i in range(1, (today - start).days + 1)]
-        dates_to_fill += [d for d in new_dates if d.weekday() < 5]
+        # 優先用交易日過濾，超出 stock_prices 範圍的日期用 weekday 過濾
+        max_price_date = max(trading_days) if trading_days else ""
+        dates_to_fill += [d for d in new_dates if d.strftime("%Y-%m-%d") in trading_days or (d.strftime("%Y-%m-%d") > max_price_date and d.weekday() < 5)]
+
+        # 補回中間空洞：有價格資料但沒有籌碼的交易日
+        hole_rows = conn.execute(
+            "SELECT DISTINCT date FROM stock_prices WHERE date >= ? AND date <= ? AND date NOT IN (SELECT DISTINCT date FROM institutional) ORDER BY date",
+            (price_start.strftime("%Y-%m-%d"), latest_in_db)
+        ).fetchall()
+        hole_dates = [datetime.strptime(r[0], "%Y-%m-%d").date() for r in hole_rows]
+        existing_set = set(dates_to_fill)
+        for hd in hole_dates:
+            if hd not in existing_set:
+                dates_to_fill.append(hd)
+        if hole_dates:
+            dates_to_fill.sort()
     else:
-        all_dates = [price_start + timedelta(days=i) for i in range((today - price_start).days + 1)]
-        dates_to_fill = [d for d in all_dates if d.weekday() < 5]
+        # 首次同步：用交易日，若無價格資料則用 weekday
+        if trading_days:
+            dates_to_fill = sorted(datetime.strptime(d, "%Y-%m-%d").date() for d in trading_days)
+        else:
+            all_dates = [price_start + timedelta(days=i) for i in range((today - price_start).days + 1)]
+            dates_to_fill = [d for d in all_dates if d.weekday() < 5]
 
     if not dates_to_fill:
         print("籌碼資料已是最新", flush=True)
         return 0
 
+    print(f"@PROGRESS|chips|0|{len(dates_to_fill)}", flush=True)
     print(f"同步籌碼資料，{len(dates_to_fill)} 個交易日...", flush=True)
     inst_total = 0
     margin_total = 0
 
-    def _fetch_day(d):
-        """並行抓取單日法人 + 融資券"""
-        time.sleep(0.3)  # 錯開請求
-        tse_inst = fetch_twse_institutional(d)
-        margin = fetch_twse_margin(d)
-        return d, tse_inst, margin
+    def _fetch_with_retry(d, kind, fetch_fn, label):
+        """帶指數退避重試的抓取"""
+        for attempt in range(3):
+            try:
+                return d, kind, fetch_fn(d)
+            except Exception as e:
+                if attempt < 2:
+                    delay = (attempt + 1) * 2  # 2s, 4s
+                    print(f"  [WARN] {d} {label}第{attempt+1}次失敗: {e}，{delay}秒後重試", flush=True)
+                    time.sleep(delay)
+                else:
+                    print(f"  [WARN] {d} {label}抓取失敗（已重試3次）: {e}", flush=True)
+                    return d, kind, {}
 
-    # 分批並行（每批 5 天，避免 TWSE rate limit）
-    BATCH_SIZE = 5
+    def _fetch_inst(d):
+        return _fetch_with_retry(d, "inst", fetch_twse_institutional, "法人")
+
+    def _fetch_margin(d):
+        return _fetch_with_retry(d, "margin", fetch_twse_margin, "融資券")
+
+    # 並行抓取：法人和融資券拆成獨立任務，提高併發度
+    BATCH_SIZE = 10
     for batch_start in range(0, len(dates_to_fill), BATCH_SIZE):
         batch = dates_to_fill[batch_start:batch_start + BATCH_SIZE]
 
-        with ThreadPoolExecutor(max_workers=BATCH_SIZE) as executor:
-            futures = {executor.submit(_fetch_day, d): d for d in batch}
-            results = []
+        # 每天 2 個任務（法人 + 融資券），共 BATCH_SIZE*2 個任務
+        day_data = {d: {"inst": {}, "margin": {}} for d in batch}
+        with ThreadPoolExecutor(max_workers=BATCH_SIZE * 2) as executor:
+            futures = []
+            for d in batch:
+                futures.append(executor.submit(_fetch_inst, d))
+                futures.append(executor.submit(_fetch_margin, d))
             for future in as_completed(futures):
-                results.append(future.result())
+                d, kind, data = future.result()
+                day_data[d][kind] = data
 
-        for d, tse_inst, margin in sorted(results, key=lambda x: x[0]):
+        for d in sorted(day_data.keys()):
             date_str = d.strftime("%Y-%m-%d")
+            tse_inst = day_data[d]["inst"]
+            margin = day_data[d]["margin"]
+
             day_inst = 0
             for code, v in tse_inst.items():
                 symbol = TSE_SYMBOLS.get(code)
@@ -726,7 +796,9 @@ def sync_chips(conn):
             inst_total += day_inst
             margin_total += day_margin
 
-        time.sleep(1)  # 批次間休息
+        done_days = min(batch_start + BATCH_SIZE, len(dates_to_fill))
+        print(f"@PROGRESS|chips|{done_days}|{len(dates_to_fill)}", flush=True)
+        time.sleep(0.3)  # 批次間短暫休息
 
     log_sync(conn, "chips", "success", inst_total + margin_total, started_at=started_at)
     print(f"籌碼同步完成：法人 {inst_total} 筆，融資券 {margin_total} 筆", flush=True)
@@ -773,6 +845,7 @@ def sync_monthly_revenue(conn):
         d = date.today() - timedelta(days=900)
         start_date = d.strftime("%Y-%m-%d")
 
+    print(f"@PROGRESS|monthly_revenue|0|{len(ALL_STOCKS)}", flush=True)
     print(f"同步月營收（FinMind API），起始日 {start_date}...", flush=True)
 
     all_symbols = list(ALL_STOCKS)
@@ -793,6 +866,7 @@ def sync_monthly_revenue(conn):
                 batch.append((symbol, r["year"], r["month"], r["revenue"]))
             done += 1
             if done % 200 == 0 or done == len(all_symbols):
+                print(f"@PROGRESS|monthly_revenue|{done}|{len(all_symbols)}", flush=True)
                 print(f"  下載進度 {done}/{len(all_symbols)} ({done*100//len(all_symbols)}%)，暫存 {len(batch)} 筆", flush=True)
 
     if not batch:

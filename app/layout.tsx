@@ -11,13 +11,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="zh-Hant">
       <body className="min-h-screen bg-slate-900 text-slate-100">
-        <nav className="border-b border-slate-700 px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2">
-          <span className="font-bold text-lg text-white">台股推薦系統</span>
-          <a href="/" className="text-slate-300 hover:text-white text-sm">推薦清單</a>
-          <a href="/settings" className="text-slate-300 hover:text-white text-sm">篩選設定</a>
-          <a href="/model" className="text-slate-300 hover:text-white text-sm">模型</a>
+        <nav className="border-b border-slate-800 px-4 py-2 flex items-center gap-5">
+          <a href="/" className="font-bold text-sm text-white hover:text-slate-200">台股推薦系統</a>
+          <a href="/" className="text-slate-400 hover:text-white text-xs">推薦清單</a>
+          <a href="/settings" className="text-slate-400 hover:text-white text-xs">篩選設定</a>
         </nav>
-        <main className="px-3 py-4 sm:px-6 sm:py-6 overflow-x-hidden">{children}</main>
+        <main className="px-3 py-2 sm:px-4 sm:py-3 overflow-x-hidden">{children}</main>
       </body>
     </html>
   )

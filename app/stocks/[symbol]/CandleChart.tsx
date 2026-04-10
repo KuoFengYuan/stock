@@ -217,15 +217,24 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
 
     // 自訂滾動：滾輪 + 滑鼠拖曳 + 觸控拖曳
     const containers = [priceRef.current, volRef.current, foreignRef.current, trustRef.current].filter(Boolean) as HTMLDivElement[]
-    const maxScroll = -(prices.length - 60)
+    const visibleBars = 60
+    const maxLeftScroll = -(prices.length - visibleBars)
 
     function resetBarSpacing() {
       allCharts.forEach(c => c.timeScale().applyOptions({ barSpacing: 8 }))
     }
 
+    function getScrollBounds() {
+      // scrollPosition: 正數=最新K棒右邊有空白，負數=往左捲了
+      // 右邊界：允許捲到最新K棒（正數方向不限死在0，用初始位置為上限）
+      const rightBound = visibleBars  // 允許向右足夠空間回到最新
+      return { left: maxLeftScroll, right: rightBound }
+    }
+
     function clampScroll(delta: number) {
       const pos = priceChart.timeScale().scrollPosition()
-      const newPos = Math.max(maxScroll, Math.min(0, pos + delta))
+      const bounds = getScrollBounds()
+      const newPos = Math.max(bounds.left, Math.min(bounds.right, pos + delta))
       allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
       resetBarSpacing()
     }
@@ -245,7 +254,8 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       if (!dragging) return
       const dx = e.clientX - dragStartX
       const barDelta = dx / 8
-      const newPos = Math.max(maxScroll, Math.min(0, dragStartPos + barDelta))
+      const bounds = getScrollBounds()
+      const newPos = Math.max(bounds.left, Math.min(bounds.right, dragStartPos + barDelta))
       allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
       resetBarSpacing()
     }
@@ -259,7 +269,8 @@ export default function CandleChart({ prices, institutional, visibleMA, onMaSeri
       e.preventDefault()
       const dx = e.touches[0].clientX - touchStartX
       const barDelta = dx / 8
-      const newPos = Math.max(maxScroll, Math.min(0, touchStartPos + barDelta))
+      const bounds = getScrollBounds()
+      const newPos = Math.max(bounds.left, Math.min(bounds.right, touchStartPos + barDelta))
       allCharts.forEach(c => c.timeScale().scrollToPosition(newPos, false))
       resetBarSpacing()
     }

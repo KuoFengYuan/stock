@@ -17,6 +17,10 @@ export async function POST(req: NextRequest) {
   let mode = body.mode || 'all'
   const force = body.force === true
 
+  // 支援的模式：all, prices, financials, chips, monthly_revenue, prices_chips
+  const validModes = ['all', 'prices', 'financials', 'chips', 'monthly_revenue', 'prices_chips']
+  if (!validModes.includes(mode)) mode = 'all'
+
   let skippedFinancials = false
 
   if ((mode === 'financials' || mode === 'all') && !force) {
