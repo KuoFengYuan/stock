@@ -118,7 +118,7 @@ export default function HomePage() {
   return (
     <div className="max-w-[1600px] mx-auto">
       {/* 頂部 */}
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
         <div>
           <h1 className="text-lg font-bold text-white">今日推薦</h1>
           <p className="text-xs text-slate-500 mt-0.5">
@@ -127,18 +127,18 @@ export default function HomePage() {
             {lastAnalyze && <> · 分析{lastAnalyze}</>}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <button onClick={handleSync} disabled={busy}
-            className="h-8 px-4 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-md transition-colors inline-flex items-center gap-1.5">
+            className="h-8 px-3 sm:px-4 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-md transition-colors inline-flex items-center gap-1.5">
             {syncing && <span className="animate-spin w-3 h-3 border-2 border-white/30 border-t-white rounded-full" />}
             {syncing ? `同步中 ${fmtTime(syncSec)}` : '同步資料'}
           </button>
           <button onClick={() => handleAnalyze('rule')} disabled={busy}
-            className="h-8 px-4 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-md transition-colors">
+            className="h-8 px-3 sm:px-4 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-md transition-colors">
             {analyzing ? `分析中 ${fmtTime(analyzeSec)}` : '規則分析'}
           </button>
           <button onClick={() => handleAnalyze('ml')} disabled={busy}
-            className="h-8 px-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded-md transition-colors font-medium">
+            className="h-8 px-3 sm:px-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded-md transition-colors font-medium">
             {analyzing ? `分析中 ${fmtTime(analyzeSec)}` : 'AI 分析'}
           </button>
         </div>
