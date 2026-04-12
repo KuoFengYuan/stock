@@ -179,8 +179,13 @@ def train():
         auc_scores.append(auc)
         print(f"  Fold {fold+1}: AUC={auc:.4f} (train={len(X_train)}, val={len(X_val)})", flush=True)
 
-    mean_auc = float(np.mean(auc_scores)) if auc_scores else 0.60
-    print(f"平均 AUC: {mean_auc:.4f}", flush=True)
+    # 只取後 3 folds 平均（早期 folds 訓練資料太少會拖累）
+    if len(auc_scores) >= 3:
+        mean_auc = float(np.mean(auc_scores[-3:]))
+        print(f"平均 AUC（後 3 folds）: {mean_auc:.4f}", flush=True)
+    else:
+        mean_auc = float(np.mean(auc_scores)) if auc_scores else 0.60
+        print(f"平均 AUC: {mean_auc:.4f}", flush=True)
 
     print("訓練最終模型...", flush=True)
     model.fit(X, y, verbose=False)

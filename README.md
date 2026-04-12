@@ -34,7 +34,10 @@ ml/                               # Python ML 模組（conda env: stock）
   features.py                     # 特徵工程：19 維特徵
   fundamentals.py                 # 基本面計算（共用模組）
   strategies.py                   # Piotroski F-Score / PEG / Minervini SEPA
-  rule_engine.py                  # 規則引擎：五層評分 + 連續買賣超追蹤
+  rule_engine.py                  # 規則引擎：六層評分（基本面→估值→營收→籌碼→技術→大師共識）
+  agents/                         # 投資大師 agent 模組（7 位）
+    buffett.py / graham.py / munger.py / fisher.py
+    druckenmiller.py / wood.py / ackman.py
   train.py                        # XGBoost 訓練（相對強勢標籤）
   predict.py                      # ML × 權重 + 規則 × 權重 混合預測
   backtest.py                     # 規則回測 → rule_scores.json
@@ -82,10 +85,12 @@ TWSE API            yfinance          FinMind API
 
 ```
 最終分數 = ML 分數 × ML權重 + 規則分數 × 規則權重
-ML 權重 = clamp((AUC - 0.50) / 0.20 × 0.80, 0, 0.80)
+ML 權重 = clamp((AUC - 0.50) / 0.20, 0, 0.80)
 ```
 
 - ML 權重由模型交叉驗證 AUC 自動決定（AUC 越高 → ML 佔比越大）
+  - AUC 0.55 → ML 25%、AUC 0.60 → ML 50%、AUC 0.65 → ML 75%
+- AUC 計算：只取後 3 folds（早期 folds 訓練資料少會拖累）
 - 規則引擎有一票否決權：規則判定 neutral → 最終一定是 neutral
 
 ### 動態門檻（大盤擇時）
@@ -97,11 +102,29 @@ watch_thresh = 0.50 + (market_win_rate - 0.50) × 0.30
 
 熊市（market_win_rate < 0.42）時自動提高門檻，減少誤推。
 
+### 訊號判定邏輯（buy / watch / neutral）
+
+| 條件 | 訊號 | 說明 |
+|---|---|---|
+| `final_score >= buy_thresh` | **買入** | 分數夠高、規則沒否決 |
+| `watch_thresh ≤ final_score < buy_thresh` | **觀察** | 分數不夠買入，但有觀察價值 |
+| `final_score < watch_thresh` | **中立** | 分數太低 |
+| 規則 neutral 且無 reasons | **中立** | 硬性否決（TTM 虧損 / PE>60 / 近一年跌超 60% / Piotroski≤1 / 無基本面訊號） |
+| 規則 neutral 但有 reasons | 最多 **觀察** | 風險扣分但基本面還行，ML 救不到買入 |
+
+**「觀察」的實際意涵**：基本面還行（沒被前置過濾掉），但分數不夠好到推「買入」，通常是因為：
+- 漲太多了（追高風險：近 20 日漲 > 15%）
+- 量價背離（價漲量縮 → 不健康上漲）
+- 技術面短期過熱（RSI > 80、乖離率 > 15%）
+- 籌碼警告（外資/投信連續賣超 / 買賣超背離）
+
+建議：放入追蹤名單，等拉回或訊號改善再考慮。
+
 ---
 
-## 規則引擎（五層評分架構）
+## 規則引擎（六層評分架構）
 
-最終分數 = `底分 + 基本面加成 + 估值調整 + 營收加成 + 籌碼調整 + 技術微調`
+最終分數 = `底分 + 基本面加成 + 估值調整 + 營收加成 + 籌碼調整 + 技術微調 + 大師共識加成`
 
 ### 前置過濾（直接 neutral 退出）
 - TTM 淨利為負 / PE > 60 / 近一年跌超 60% / Piotroski <= 1 / 無基本面訊號
@@ -123,6 +146,18 @@ watch_thresh = 0.50 + (market_win_rate - 0.50) × 0.30
 
 ### 第五層：技術面微調（± 0.01 ~ 0.03）
 - Minervini SEPA 趨勢、RS 相對強度、RSI、回調、量價背離
+
+### 第六層：投資大師共識（± 0.05）
+7 位大師各自以規則評估股票，平均權重加成到分數：
+- **Buffett**：高 ROE + 低負債 + 合理 PE
+- **Graham**：低 PE/PB + 殖利率（虧損直接否決）
+- **Munger**：高 ROE + AI 產業護城河
+- **Fisher**：高成長 + 月營收連續年增
+- **Druckenmiller**：RS 排名 + Minervini 趨勢 + 短期動能
+- **Wood**：AI 創新主題（GPU/機器人/雲端）+ 高成長
+- **Ackman**：QARP（高 ROE + 穩成長 + 合理 PE）
+
+每位回傳 bullish/neutral/bearish + confidence + reasons。5 位以上看多/看空會寫入推薦理由。
 
 ---
 
@@ -155,7 +190,7 @@ watch_thresh = 0.50 + (market_win_rate - 0.50) × 0.30
 | 日 K 線 | TWSE 全市場日 API（增量）/ 個股月 API（歷史） | 張（股÷1000） | 每日 |
 | 三大法人 | TWSE T86 API | 股（DB 原值） | 每日 |
 | 融資融券 | TWSE MI_MARGN API | 張 | 每日 |
-| 季度財報 | yfinance | 元 | 每季 |
+| 季度財報 | yfinance（主力）+ FinMind（補 EPS） | 元 | 每季 |
 | 月營收 | MOPS 公開資訊觀測站 | 元 | 每月 |
 
 **重要**：`institutional` 表存的是「股」，前端顯示時 `÷1000` 換算「張」。
@@ -183,9 +218,10 @@ watch_thresh = 0.50 + (market_win_rate - 0.50) × 0.30
 ### 首頁（`/`）
 - 推薦清單：代號、名稱、市場、收盤價、漲跌幅、成交量、評分條、訊號標籤、推薦理由
 - AI 概念股標籤（紫色）+ 子分類
-- 同步資料（SSE 進度條 + ETA 預估）/ 規則分析 / AI 分析
+- 同步資料（SSE 進度條 + ETA 預估）/ AI 分析（自動整合規則 + 大師共識 + ML 模型）
 - 篩選：訊號（全部/買入/觀察/中立） + AI 主題下拉選單
 - 表格排序：收盤價 / 漲跌幅 / 成交量 / 評分
+- **大師共識欄位**：顯示 `X/7` 看多數（hover 看每位大師意見）
 - 最後同步時間顯示
 
 ### 個股頁（`/stocks/[symbol]`）

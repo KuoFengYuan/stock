@@ -38,6 +38,19 @@ export interface StockTag {
   sub_tag: string | null
 }
 
+export interface AgentDetail {
+  name: string
+  signal: 'bullish' | 'neutral' | 'bearish'
+  confidence: number
+  reasons: string[]
+}
+
+export interface AgentConsensus {
+  bullish: number
+  neutral: number
+  bearish: number
+}
+
 export interface RecommendationItem {
   symbol: string
   name: string
@@ -49,6 +62,8 @@ export interface RecommendationItem {
   volume: number
   reasons: string[]
   tags: StockTag[]
+  agentConsensus?: AgentConsensus | null
+  agentDetails?: AgentDetail[] | null
   // 基本面
   peRatio?: number
   pbRatio?: number

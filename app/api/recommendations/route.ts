@@ -68,7 +68,7 @@ export async function GET(req: NextRequest) {
     `SELECT r.symbol, s.name, s.market, r.score, r.signal,
             COALESCE(p.close, latest.close) as close,
             COALESCE(p.volume, latest.volume) as volume,
-            r.reasons_json,
+            r.reasons_json, r.features_json,
             prev.close as prev_close,
             prev.date  as prev_date
      FROM recommendations r
@@ -91,7 +91,8 @@ export async function GET(req: NextRequest) {
      LIMIT ? OFFSET ?`
   ).all([...params, limit, offset]) as {
     symbol: string; name: string; market: string; score: number; signal: string;
-    close: number; prev_close: number; prev_date: string; volume: number; reasons_json: string;
+    close: number; prev_close: number; prev_date: string; volume: number;
+    reasons_json: string; features_json: string;
   }[]
 
   // 預載所有 stock_tags（一次查詢）
@@ -105,13 +106,23 @@ export async function GET(req: NextRequest) {
   }
 
   const items = rows.map((row) => {
-    // 前一交易日與當日相差超過 10 天 → 資料有缺口，不顯示漲跌幅
     const gapDays = row.prev_date && row.close
       ? (new Date(date!).getTime() - new Date(row.prev_date).getTime()) / 86400000
       : null
     const changePct = (row.prev_close && row.close && gapDays !== null && gapDays <= 10)
       ? ((row.close - row.prev_close) / row.prev_close) * 100
       : null
+
+    // 解析 agent 資訊
+    let agentConsensus: { bullish: number; neutral: number; bearish: number } | null = null
+    let agentDetails: Array<{ name: string; signal: string; confidence: number; reasons: string[] }> | null = null
+    if (row.features_json) {
+      try {
+        const f = JSON.parse(row.features_json)
+        if (f.agent_consensus) agentConsensus = f.agent_consensus
+        if (f.agent_details) agentDetails = f.agent_details
+      } catch { /* ignore */ }
+    }
 
     return {
       symbol: row.symbol,
@@ -124,6 +135,8 @@ export async function GET(req: NextRequest) {
       volume: row.volume,
       reasons: row.reasons_json ? JSON.parse(row.reasons_json) : [],
       tags: tagMap.get(row.symbol) || [],
+      agentConsensus,
+      agentDetails,
     }
   })
 

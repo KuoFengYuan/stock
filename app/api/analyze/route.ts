@@ -3,30 +3,18 @@ import { runPythonScript } from '@/lib/analysis/ml-runner'
 import path from 'path'
 import fs from 'fs'
 
-export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => ({}))
-  const mode = body.mode || 'rule' // "rule" | "ml"
-
+export async function POST(_req: NextRequest) {
+  // 只保留一個分析入口：有模型就跑 ML（包含規則 + 大師共識 + ML 混合），
+  // 沒模型就跑純規則 + 大師共識
   const modelPath = path.join(process.cwd(), 'ml', 'model.pkl')
   const hasModel = fs.existsSync(modelPath)
-
-  let script: string
-  if (mode === 'ml' && hasModel) {
-    script = 'predict.py'
-  } else if (mode === 'ml' && !hasModel) {
-    return NextResponse.json({
-      success: false,
-      error: '尚未訓練模型，請先至「設定」頁面執行「重新訓練模型」',
-    })
-  } else {
-    script = 'rule_engine.py'
-  }
+  const script = hasModel ? 'predict.py' : 'rule_engine.py'
 
   const result = await runPythonScript(script)
 
   return NextResponse.json({
     success: result.success,
-    mode: mode === 'ml' && hasModel ? 'ml' : mode === 'ml' ? 'ml_trained' : 'rule',
+    mode: hasModel ? 'ml' : 'rule',
     output: result.output,
     error: result.error,
   })

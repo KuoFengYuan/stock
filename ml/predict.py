@@ -22,6 +22,7 @@ from features import _calc_price_features, _get_fund_features
 from fundamentals import calc_fundamentals
 from strategies import calc_piotroski, calc_peg, calc_minervini
 from rule_engine import calc_indicators, apply_rules, calc_monthly_revenue, _calc_high_1y, _calc_market_win_rate
+from agents import apply_agents
 
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 MODEL_PATH = Path(__file__).parent / "model.pkl"
@@ -58,9 +59,9 @@ def run_predict():
     market_env = "熊市" if market_win_rate < 0.42 else ("牛市" if market_win_rate > 0.55 else "正常")
     print(f"市場近期勝率：{market_win_rate:.1%}（{market_env}）", flush=True)
 
-    # ML 權重：AUC 0.50→0%, 0.55→30%, 0.65→65%, 0.70+→80%
-    # 線性插值：(AUC - 0.50) / 0.20 * 0.80，上限 0.80
-    ml_weight = max(0.0, min(0.80, (model_auc - 0.50) / 0.20 * 0.80))
+    # ML 權重：AUC 0.50→0%, 0.55→30%, 0.60→50%, 0.65→70%, 0.70+→80%
+    # 線性插值：(AUC - 0.50) / 0.20 * 1.0，上限 0.80
+    ml_weight = max(0.0, min(0.80, (model_auc - 0.50) / 0.20))
     rule_weight = 1.0 - ml_weight
     print(f"模型 AUC={model_auc:.4f}，ML權重={ml_weight:.2f}，規則權重={rule_weight:.2f}", flush=True)
 
@@ -120,6 +121,45 @@ def run_predict():
                 latest_feat["margin_balance_chg"] = (mb_now - mb_5) / mb_5 * 100 if mb_5 else 0
                 latest_feat["short_balance_chg"]  = (sb_now - sb_5) / sb_5 * 100 if sb_5 else 0
 
+            # 規則引擎 + 大師共識（先算，因為 agent_score 要進 ML 特徵）
+            tech = calc_indicators(df)
+            tech["high_1y"] = _calc_high_1y(df)
+            if inst_rows:
+                tech["foreign_net_60d"] = float(latest_feat["foreign_net_60d"].iloc[0]) if "foreign_net_60d" in latest_feat.columns else 0
+                tech["trust_net_60d"]   = float(latest_feat["trust_net_60d"].iloc[0])   if "trust_net_60d"   in latest_feat.columns else 0
+                tech["foreign_net_10d"] = float(latest_feat["foreign_net_10d"].iloc[0]) if "foreign_net_10d" in latest_feat.columns else 0
+                tech["trust_net_10d"]   = float(latest_feat["trust_net_10d"].iloc[0])   if "trust_net_10d"   in latest_feat.columns else 0
+
+            fund2 = calc_fundamentals(symbol, conn, price=current_price)
+            monthly = calc_monthly_revenue(symbol, conn)
+            reasons, rule_signal, rule_score = apply_rules(tech, fund2, current_price, monthly, market_win_rate)
+
+            # 第六層：大師共識
+            tag_rows = conn.execute(
+                "SELECT tag, sub_tag FROM stock_tags WHERE symbol=?", (symbol,)
+            ).fetchall()
+            agent_ctx = {
+                "fund": fund2, "tech": tech, "monthly": monthly,
+                "tags": [{"tag": t[0], "sub_tag": t[1]} for t in tag_rows],
+            }
+            agent_result = apply_agents(agent_ctx)
+            rule_score = max(0.0, min(1.0, rule_score + agent_result["bonus"]))
+            if agent_result["consensus"]["bullish"] >= 5:
+                reasons.append(f"大師共識 {agent_result['consensus']['bullish']}/7 看多")
+            elif agent_result["consensus"]["bearish"] >= 5:
+                reasons.append(f"大師共識 {agent_result['consensus']['bearish']}/7 看空")
+
+            # 把 agent_score 和月營收特徵塞進 latest_feat
+            latest_feat["agent_score"] = agent_result["agent_score"]
+            latest_feat["rev_consecutive_yoy"] = monthly.get("rev_consecutive_yoy", 0) or 0
+            latest_feat["rev_accel"] = 1.0 if monthly.get("rev_accel") else 0.0
+
+            # PE/PB clip（與訓練一致）
+            if "pe_ratio" in latest_feat.columns:
+                latest_feat["pe_ratio"] = latest_feat["pe_ratio"].clip(lower=0, upper=200)
+            if "pb_ratio" in latest_feat.columns:
+                latest_feat["pb_ratio"] = latest_feat["pb_ratio"].clip(lower=0, upper=30)
+
             # 補齊缺失特徵
             for col in feature_cols:
                 if col not in latest_feat.columns:
@@ -137,19 +177,6 @@ def run_predict():
             X = X.fillna(0)  # 仍有殘餘 NaN 則填 0
 
             ml_score = float(model.predict_proba(X)[0, 1])
-
-            # 規則引擎
-            tech = calc_indicators(df)
-            tech["high_1y"] = _calc_high_1y(df)
-            if inst_rows:
-                tech["foreign_net_60d"] = float(latest_feat["foreign_net_60d"].iloc[0]) if "foreign_net_60d" in latest_feat.columns else 0
-                tech["trust_net_60d"]   = float(latest_feat["trust_net_60d"].iloc[0])   if "trust_net_60d"   in latest_feat.columns else 0
-                tech["foreign_net_10d"] = float(latest_feat["foreign_net_10d"].iloc[0]) if "foreign_net_10d" in latest_feat.columns else 0
-                tech["trust_net_10d"]   = float(latest_feat["trust_net_10d"].iloc[0])   if "trust_net_10d"   in latest_feat.columns else 0
-
-            fund2 = calc_fundamentals(symbol, conn)
-            monthly = calc_monthly_revenue(symbol, conn)
-            reasons, rule_signal, rule_score = apply_rules(tech, fund2, current_price, monthly, market_win_rate)
 
             # 混合評分
             final_score = ml_score * ml_weight + rule_score * rule_weight
@@ -181,10 +208,14 @@ def run_predict():
             else:
                 signal = "neutral"
 
-            features_json = json.dumps({
+            features_dict = {
                 col: (float(X[col].iloc[0]) if not pd.isna(X[col].iloc[0]) else None)
                 for col in feature_cols
-            })
+            }
+            features_dict["agent_score"] = agent_result["agent_score"]
+            features_dict["agent_consensus"] = agent_result["consensus"]
+            features_dict["agent_details"] = agent_result["details"]
+            features_json = json.dumps(features_dict)
 
             conn.execute(
                 """INSERT OR REPLACE INTO recommendations

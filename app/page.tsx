@@ -133,10 +133,6 @@ export default function HomePage() {
             {syncing && <span className="animate-spin w-3 h-3 border-2 border-white/30 border-t-white rounded-full" />}
             {syncing ? `同步中 ${fmtTime(syncSec)}` : '同步資料'}
           </button>
-          <button onClick={() => handleAnalyze('rule')} disabled={busy}
-            className="h-8 px-3 sm:px-4 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-sm rounded-md transition-colors">
-            {analyzing ? `分析中 ${fmtTime(analyzeSec)}` : '規則分析'}
-          </button>
           <button onClick={() => handleAnalyze('ml')} disabled={busy}
             className="h-8 px-3 sm:px-4 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded-md transition-colors font-medium">
             {analyzing ? `分析中 ${fmtTime(analyzeSec)}` : 'AI 分析'}
@@ -261,6 +257,7 @@ function Table({ items }: { items: RecommendationItem[] }) {
               <Th label="成交量" k="volume" sk={sk} asc={asc} sort={sort} />
               <Th label="評分" k="score" sk={sk} asc={asc} sort={sort} />
               <th className="text-center py-2 px-3 font-medium whitespace-nowrap">訊號</th>
+              <th className="text-center py-2 px-3 font-medium whitespace-nowrap" title="7 位投資大師（Buffett / Graham / Munger / Fisher / Druckenmiller / Wood / Ackman）共識">大師</th>
               <th className="text-left py-2 px-3 font-medium">推薦理由</th>
             </tr>
           </thead>
@@ -288,6 +285,7 @@ function Table({ items }: { items: RecommendationItem[] }) {
                 <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap">{it.volume ? it.volume.toLocaleString() : '-'}</td>
                 <td className="py-2 px-3 text-right whitespace-nowrap"><Score v={it.score} /></td>
                 <td className="py-2 px-3 text-center whitespace-nowrap"><Signal s={it.signal} /></td>
+                <td className="py-2 px-3 text-center whitespace-nowrap"><Consensus c={it.agentConsensus} d={it.agentDetails} /></td>
                 <td className="py-2 px-3">
                   <div className="flex flex-wrap gap-1">
                     {it.reasons.map((r, i) => <Tag key={i} r={r} />)}
@@ -323,6 +321,7 @@ function MobileCard({ item: it }: { item: RecommendationItem }) {
       <div className="flex items-center gap-2">
         <Signal s={it.signal} />
         <Score v={it.score} />
+        <Consensus c={it.agentConsensus} d={it.agentDetails} />
         <span className="text-xs text-slate-600 ml-auto">{it.volume ? it.volume.toLocaleString() + '張' : ''}</span>
       </div>
       {it.reasons.length > 0 && (
@@ -376,4 +375,23 @@ function Signal({ s }: { s: string }) {
   }
   const l: Record<string, string> = { buy: '買入', watch: '觀察', neutral: '中立' }
   return <span className={`text-xs px-2 py-0.5 rounded ${m[s] ?? m.neutral}`}>{l[s] ?? s}</span>
+}
+
+function Consensus({ c, d }: {
+  c?: { bullish: number; neutral: number; bearish: number } | null
+  d?: Array<{ name: string; signal: string; confidence: number; reasons: string[] }> | null
+}) {
+  if (!c) return <span className="text-slate-700 text-xs">-</span>
+  const total = c.bullish + c.neutral + c.bearish
+  const tooltip = d ? d.map(a => `${a.name}: ${a.signal === 'bullish' ? '看多' : a.signal === 'bearish' ? '看空' : '中立'}${a.reasons.length ? ' — ' + a.reasons.slice(0, 2).join('、') : ''}`).join('\n') : undefined
+  const cls = c.bullish >= 5 ? 'bg-green-900/60 text-green-300 border border-green-700/60'
+    : c.bearish >= 5 ? 'bg-red-900/60 text-red-300 border border-red-700/60'
+    : c.bullish >= 3 ? 'bg-green-900/30 text-green-400/80'
+    : c.bearish >= 3 ? 'bg-red-900/30 text-red-400/80'
+    : 'bg-slate-700/50 text-slate-400'
+  return (
+    <span className={`inline-block text-[11px] px-1.5 py-0.5 rounded font-mono cursor-help ${cls}`} title={tooltip}>
+      {c.bullish}/{total}
+    </span>
+  )
 }

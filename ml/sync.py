@@ -154,7 +154,7 @@ def sync_stock_list(conn):
 
     # 清除不在清單中的股票及其關聯資料
     placeholders = ",".join("?" * len(ALL_STOCKS))
-    for table in ("stock_prices", "institutional", "margin_trading", "financials", "monthly_revenue", "recommendations"):
+    for table in ("stock_prices", "institutional", "margin_trading", "financials", "monthly_revenue", "recommendations", "stock_tags"):
         cur = conn.execute(
             f"DELETE FROM {table} WHERE symbol NOT IN ({placeholders})", ALL_STOCKS
         )
@@ -164,7 +164,43 @@ def sync_stock_list(conn):
     if cur.rowcount:
         print(f"  purge stocks: {cur.rowcount} rows", flush=True)
 
+    # 清除損壞資料（close=0 或 NULL 的價格列）
+    cur = conn.execute("DELETE FROM stock_prices WHERE close IS NULL OR close <= 0")
+    if cur.rowcount:
+        print(f"  purge 損壞價格: {cur.rowcount} rows", flush=True)
+
+    # 清除超過 2 年的價格/籌碼（保留訓練用的時間窗）
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=730)).strftime("%Y-%m-%d")
+    for table in ("stock_prices", "institutional", "margin_trading"):
+        cur = conn.execute(f"DELETE FROM {table} WHERE date < ?", (cutoff,))
+        if cur.rowcount:
+            print(f"  purge {table} 超過 2 年: {cur.rowcount} rows", flush=True)
+
+    # 清除超過 3 年的月營收（保留 YoY 計算需要的去年同期）
+    cutoff_rev = date.today().year - 3
+    cur = conn.execute("DELETE FROM monthly_revenue WHERE year < ?", (cutoff_rev,))
+    if cur.rowcount:
+        print(f"  purge monthly_revenue 超過 3 年: {cur.rowcount} rows", flush=True)
+
+    # 清除超過 1 年的舊推薦（每日一筆，保留最近讓前端能顯示歷史）
+    cutoff_rec = (date.today() - timedelta(days=365)).strftime("%Y-%m-%d")
+    cur = conn.execute("DELETE FROM recommendations WHERE date < ?", (cutoff_rec,))
+    if cur.rowcount:
+        print(f"  purge recommendations 超過 1 年: {cur.rowcount} rows", flush=True)
+
+    # sync_log 只保留最近 500 筆
+    cur = conn.execute(
+        "DELETE FROM sync_log WHERE id NOT IN (SELECT id FROM sync_log ORDER BY id DESC LIMIT 500)"
+    )
+    if cur.rowcount:
+        print(f"  purge sync_log: {cur.rowcount} rows", flush=True)
+
     conn.commit()
+
+    # VACUUM 回收磁碟空間（每次 sync 完會整理）
+    conn.execute("VACUUM")
+
     print(f"股票清單：{count} 檔", flush=True)
     return count
 
@@ -476,8 +512,47 @@ def _yf_insert(conn, symbol, df) -> int:
     return count
 
 
+def _fetch_finmind_eps(code: str, start_date: str) -> dict[tuple[int, int], float]:
+    """
+    用 FinMind 只抓單季 EPS，回傳 {(year, quarter): eps}。
+    用來補 yfinance 缺失的 EPS（特別是 Q3 / Q4）。
+
+    注意：FinMind 的 TaiwanStockFinancialStatements 裡 Revenue/NI 數字有時不是單季，
+    所以只用 EPS（這個欄位相對可信），其他財報欄位仍由 yfinance 提供。
+    """
+    url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockFinancialStatements&data_id={code}&start_date={start_date}"
+    r = _retry_get(SESSION, url, timeout=12, retries=1, delay=2, label=f"FinMind EPS {code}")
+    if not r:
+        return {}
+    try:
+        data = r.json().get("data", [])
+    except Exception:
+        return {}
+
+    result = {}
+    for row in data:
+        if row.get("type") != "EPS":
+            continue
+        try:
+            y, m, _ = row["date"].split("-")
+            year, month = int(y), int(m)
+            quarter = (month - 1) // 3 + 1
+            eps = row.get("value")
+            if eps is not None:
+                result[(year, quarter)] = eps
+        except Exception:
+            pass
+    return result
+
+
 def sync_financials(conn):
-    """同步財務報表（yfinance，並發）"""
+    """
+    同步財務報表（yfinance 主力 + FinMind 補 EPS）。
+
+    策略：
+    1. yfinance 抓完整季報（revenue/ni/equity/assets/debt/eps）— 季度有時會缺（例如 Q3）
+    2. FinMind 單季 EPS 補回 yfinance 缺失的季度（FinMind 台股 EPS 覆蓋率高、單季連續）
+    """
     started_at = int(time.time() * 1000)
     total = 0
 
@@ -490,34 +565,53 @@ def sync_financials(conn):
     print(f"@PROGRESS|financials|0|{len(need_dl)}", flush=True)
     print(f"同步財務報表，{len(need_dl)} 檔需更新...", flush=True)
 
+    # FinMind 補 EPS 用的起始日
+    fm_start = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
+
     def _fetch_fin(symbol):
+        code = _code(symbol)
+        # 主力：yfinance
+        yf_rows = []
         try:
             ticker = yf.Ticker(symbol)
             income = ticker.quarterly_income_stmt
             balance = ticker.quarterly_balance_sheet
-            if income is None or income.empty:
-                return symbol, []
-            rows = []
-            for col in income.columns:
-                try:
-                    year, month = col.year, col.month
-                    quarter = (month - 1) // 3 + 1
-                    revenue = _get_val(income, col, ["Total Revenue", "Revenue"])
-                    op_profit = _get_val(income, col, ["Operating Income", "EBIT"])
-                    net_income = _get_val(income, col, ["Net Income"])
-                    eps = _get_val(income, col, ["Basic EPS", "Diluted EPS"])
-                    equity = _get_val(balance, col, ["Stockholders Equity", "Total Equity Gross Minority Interest"]) if balance is not None and not balance.empty else None
-                    total_assets = _get_val(balance, col, ["Total Assets"]) if balance is not None and not balance.empty else None
-                    total_debt = _get_val(balance, col, ["Total Debt", "Long Term Debt"]) if balance is not None and not balance.empty else None
-                    rows.append((symbol, year, quarter, revenue, op_profit, net_income, eps, equity, total_assets, total_debt))
-                except Exception:
-                    pass
-            return symbol, rows
-        except Exception as e:
-            return symbol, []
+            if income is not None and not income.empty:
+                for col in income.columns:
+                    try:
+                        year, month = col.year, col.month
+                        quarter = (month - 1) // 3 + 1
+                        revenue = _get_val(income, col, ["Total Revenue", "Revenue"])
+                        op_profit = _get_val(income, col, ["Operating Income", "EBIT"])
+                        net_income = _get_val(income, col, ["Net Income"])
+                        eps = _get_val(income, col, ["Basic EPS", "Diluted EPS"])
+                        equity = _get_val(balance, col, ["Stockholders Equity", "Total Equity Gross Minority Interest"]) if balance is not None and not balance.empty else None
+                        total_assets = _get_val(balance, col, ["Total Assets"]) if balance is not None and not balance.empty else None
+                        total_debt = _get_val(balance, col, ["Total Debt", "Long Term Debt"]) if balance is not None and not balance.empty else None
+                        yf_rows.append((year, quarter, revenue, op_profit, net_income, eps, equity, total_assets, total_debt))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 補充：FinMind EPS（彌補 yfinance 缺的季度）
+        fm_eps_map = _fetch_finmind_eps(code, fm_start)
+
+        # 合併：把 yfinance 的每季資料用 dict 索引，再用 FinMind 補齊 EPS
+        by_yq = {(r[0], r[1]): list(r) for r in yf_rows}
+        for (y, q), eps in fm_eps_map.items():
+            if (y, q) not in by_yq:
+                # yfinance 完全沒有這季 → 新增一列（只有 EPS，其他欄位 None）
+                by_yq[(y, q)] = [y, q, None, None, None, eps, None, None, None]
+            elif by_yq[(y, q)][5] is None:
+                # yfinance 有這季但 EPS 缺 → 用 FinMind 補
+                by_yq[(y, q)][5] = eps
+
+        rows = [(symbol, *data) for data in by_yq.values()]
+        return symbol, rows
 
     done = 0
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=15) as executor:
         futures = {executor.submit(_fetch_fin, s): s for s in need_dl}
         for fut in as_completed(futures):
             symbol, rows = fut.result()
@@ -534,22 +628,54 @@ def sync_financials(conn):
                 print(f"  財務進度 {done}/{len(need_dl)}，累計 {total} 筆", flush=True)
 
     # 回填缺失的 EPS：用同股票其他季度的 EPS/net_income 比例推算
+    # 改進：
+    # 1. 用最近 4 季有效資料計算中位數比例（避免極端值污染）
+    # 2. 檢查 EPS/NI 比例合理範圍（避免除權息/股本變動導致比例異常）
+    # 3. 只回填最近 2 年資料（更久的回填無意義）
+    from datetime import date
+    min_year = date.today().year - 2
     null_eps = conn.execute(
-        "SELECT symbol, year, quarter, net_income FROM financials WHERE eps IS NULL AND net_income IS NOT NULL"
+        "SELECT symbol, year, quarter, net_income FROM financials WHERE eps IS NULL AND net_income IS NOT NULL AND year >= ?",
+        (min_year,)
     ).fetchall()
     filled = 0
+    skipped = 0
     for symbol, year, quarter, net_income in null_eps:
-        ref = conn.execute(
-            "SELECT eps, net_income FROM financials WHERE symbol=? AND eps IS NOT NULL AND net_income IS NOT NULL AND net_income != 0 ORDER BY ABS((year*10+quarter) - (? *10+?)) LIMIT 1",
+        # 取同股票 EPS/NI 比例中位數（最近 4 季有效資料）
+        refs = conn.execute(
+            """SELECT eps, net_income FROM financials
+               WHERE symbol=? AND eps IS NOT NULL AND net_income IS NOT NULL AND net_income != 0
+               ORDER BY ABS((year*10+quarter) - (?*10+?)) LIMIT 4""",
             (symbol, year, quarter)
-        ).fetchone()
-        if ref and ref[1] != 0:
-            estimated_eps = round(net_income * (ref[0] / ref[1]), 2)
-            conn.execute("UPDATE financials SET eps=? WHERE symbol=? AND year=? AND quarter=?", (estimated_eps, symbol, year, quarter))
-            filled += 1
-    if filled:
+        ).fetchall()
+        if not refs:
+            skipped += 1
+            continue
+        ratios = [r[0] / r[1] for r in refs if r[1] != 0]
+        if not ratios:
+            skipped += 1
+            continue
+        # 用中位數（比任何單季更穩定）
+        ratios.sort()
+        median_ratio = ratios[len(ratios) // 2]
+        # 檢查比例合理性：ratio 應該接近 1/股數（通常極小值 ~ 1e-9）
+        # 若跨季 ratio 離散度太大（stddev/mean > 30%），跳過避免股本變動污染
+        if len(ratios) >= 3:
+            mean_r = sum(ratios) / len(ratios)
+            if mean_r != 0:
+                var = sum((r - mean_r) ** 2 for r in ratios) / len(ratios)
+                stddev = var ** 0.5
+                cv = stddev / abs(mean_r)
+                if cv > 0.3:  # 比例變異過大 → 股本有變動，不可信
+                    skipped += 1
+                    continue
+        estimated_eps = round(net_income * median_ratio, 2)
+        conn.execute("UPDATE financials SET eps=? WHERE symbol=? AND year=? AND quarter=?",
+                     (estimated_eps, symbol, year, quarter))
+        filled += 1
+    if filled or skipped:
         conn.commit()
-        print(f"  EPS 回填 {filled} 筆", flush=True)
+        print(f"  EPS 回填 {filled} 筆（跳過 {skipped} 筆：資料不足或股本有變動）", flush=True)
 
     log_sync(conn, "financials", "success", total, started_at=started_at)
     print(f"財務報表同步完成，共 {total} 筆", flush=True)

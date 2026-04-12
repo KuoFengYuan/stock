@@ -49,7 +49,7 @@ app/                    # Next.js App Router 前端
   api/                  # API routes
     sync/               # POST → SSE 串流，呼叫 ml/sync.py
     sync-status/        # GET → 各資料類型最後同步時間
-    analyze/            # POST → 呼叫 rule_engine.py 或 predict.py
+    analyze/            # POST → 有 model.pkl 就跑 predict.py（ML+規則+大師），否則 rule_engine.py
     recommendations/    # GET → 查詢 recommendations 表（含價格 fallback）
     stocks/             # GET → 個股價格 + 法人資料
     train/              # POST → 呼叫 train.py
@@ -62,7 +62,8 @@ ml/                     # Python ML 模組（conda env: stock）
   features.py           # 特徵工程：19 維特徵（技術/基本面/籌碼）
   fundamentals.py       # 基本面計算（共用模組）
   strategies.py         # Piotroski / PEG / Minervini 策略
-  rule_engine.py        # 規則引擎：五層評分（基本面→估值→營收→籌碼→技術）
+  rule_engine.py        # 規則引擎：六層評分（基本面→估值→營收→籌碼→技術→大師共識）
+  agents/               # 投資大師 agent 模組（Buffett/Graham/Munger/Fisher/Druckenmiller/Wood/Ackman）
   train.py              # XGBoost 訓練：相對強勢標籤（top 30%）
   predict.py            # 混合預測：ML × 權重 + 規則 × 權重
   backtest.py           # 規則回測 → rule_scores.json
@@ -80,12 +81,15 @@ ML 權重 = clamp((AUC - 0.50) / 0.20 × 0.80, 0, 0.80)
 ```
 規則引擎有一票否決權：規則 neutral → 不論 ML 多高都壓到 neutral。
 
-### 規則引擎五層結構 (rule_engine.py `apply_rules`)
+### 規則引擎六層結構 (rule_engine.py)
 1. **基本面品質**：底分 + 遞減加成（ROE/營收/獲利/負債/Piotroski）
 2. **估值乘數**：PE/PB/PEG/殖利率/產業相對/追高懲罰（×0.70~1.15）
 3. **月營收乘數**：年增連月/加速成長（×1.00~1.15）
 4. **籌碼乘數**：外資投信 60d 淨買、10d 買賣超背離、融資融券（×0.75~1.15）
 5. **技術面微調**：Minervini 趨勢/RS 強度/RSI/回調/量價背離（±0.06）
+6. **大師共識**：7 位投資大師（Buffett/Graham/Munger/Fisher/Druckenmiller/Wood/Ackman）平均權重軟加分（±0.05）
+   - 規則式實作（非 LLM），每位接收 fund/tech/monthly/tags，回傳 bullish/neutral/bearish
+   - `apply_agents()` 同時被 rule_engine.py 和 predict.py 呼叫，確保規則分析和 AI 分析都有共識
 
 ### 動態門檻（大盤擇時）
 ```

@@ -40,13 +40,42 @@ def calc_fundamentals(symbol: str, conn, price: float | None = None) -> dict:
 
     shares = _estimate_shares(rows)
 
-    # EPS TTM
+    # EPS TTM — 檢查最近 4 季是否連續，不連續則嘗試補齊
+    def _quarters_back(year, q, n):
+        """計算 (year, q) 往前 n 季的 (year, q)"""
+        total = year * 4 + (q - 1) - n
+        return total // 4, total % 4 + 1
+
     eps_parts = []
-    for r in rows[:4]:
-        if r.get("eps") is not None:
-            eps_parts.append(r["eps"])
-        elif r.get("net_income") is not None and shares and shares > 0:
-            eps_parts.append(r["net_income"] / shares)
+    if len(rows) >= 4:
+        latest_y, latest_q = rows[0]["year"], rows[0]["quarter"]
+        # 檢查 rows[0..3] 是否為連續 4 季
+        expected = [_quarters_back(latest_y, latest_q, i) for i in range(4)]
+        actual = [(r["year"], r["quarter"]) for r in rows[:4]]
+        is_continuous = expected == actual
+
+        if is_continuous:
+            for r in rows[:4]:
+                if r.get("eps") is not None:
+                    eps_parts.append(r["eps"])
+                elif r.get("net_income") is not None and shares and shares > 0:
+                    eps_parts.append(r["net_income"] / shares)
+        else:
+            # 不連續：從 latest 開始，只加總連續的季度
+            rows_by_yq = {(r["year"], r["quarter"]): r for r in rows}
+            for y, q in expected:
+                r = rows_by_yq.get((y, q))
+                if r is None:
+                    eps_parts = []  # 放棄，TTM 不可信
+                    break
+                if r.get("eps") is not None:
+                    eps_parts.append(r["eps"])
+                elif r.get("net_income") is not None and shares and shares > 0:
+                    eps_parts.append(r["net_income"] / shares)
+                else:
+                    eps_parts = []
+                    break
+
     if eps_parts:
         result["eps_ttm"] = sum(eps_parts)
 

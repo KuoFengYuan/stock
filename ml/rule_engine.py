@@ -24,6 +24,7 @@ import pandas_ta as ta
 sys.path.insert(0, str(Path(__file__).parent))
 from fundamentals import calc_fundamentals
 from strategies import calc_piotroski, calc_peg, calc_minervini
+from agents import apply_agents
 
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 RULE_SCORES_PATH = Path(__file__).parent / "rule_scores.json"
@@ -850,6 +851,23 @@ def run_rule_engine():
                 industry_median_pe=ind_pe,
             )
 
+            # 第六層：大師共識軟加分
+            tag_rows = conn.execute(
+                "SELECT tag, sub_tag FROM stock_tags WHERE symbol=?", (symbol,)
+            ).fetchall()
+            agent_ctx = {
+                "fund": fund, "tech": tech, "monthly": monthly,
+                "minervini": mini, "rs_pctile": rs,
+                "tags": [{"tag": t["tag"], "sub_tag": t["sub_tag"]} for t in tag_rows],
+            }
+            agent_result = apply_agents(agent_ctx)
+            score = max(0.0, min(1.0, score + agent_result["bonus"]))
+            bullish_n = agent_result["consensus"]["bullish"]
+            if bullish_n >= 5:
+                reasons.append(f"大師共識 {bullish_n}/7 看多")
+            elif agent_result["consensus"]["bearish"] >= 5:
+                reasons.append(f"大師共識 {agent_result['consensus']['bearish']}/7 看空")
+
             features = {**tech, **fund, **monthly}
             if pio:
                 features["piotroski"] = pio.get("piotroski")
@@ -859,6 +877,9 @@ def run_rule_engine():
                 features["minervini"] = mini.get("minervini")
             if rs is not None:
                 features["rs_pctile"] = round(rs, 1)
+            features["agent_score"] = agent_result["agent_score"]
+            features["agent_consensus"] = agent_result["consensus"]
+            features["agent_details"] = agent_result["details"]
 
             conn.execute(
                 """INSERT OR REPLACE INTO recommendations

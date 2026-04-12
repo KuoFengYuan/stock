@@ -25,9 +25,13 @@ FEATURE_COLS = [
     # 基本面（已修正 lookahead bias）
     "eps_ttm", "roe", "debt_ratio", "revenue_yoy", "ni_yoy",
     "pe_ratio", "pb_ratio",
-    # 籌碼面（foreign_net_60d/trust_net_60d 覆蓋率僅 30%，改由規則引擎處理）
+    # 月營收特徵（新增）
+    "rev_consecutive_yoy", "rev_accel",
+    # 籌碼面（foreign_net_60d/trust_net_60d 覆蓋率僅 30%，已移除避免噪音）
     "margin_balance_chg",
     "short_balance_chg",
+    # 大師共識評分（0-1，7 位投資大師平均權重）
+    "agent_score",
 ]
 
 
@@ -43,6 +47,8 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
     all_financials = _load_all_financials(conn)
     all_inst = _load_all_institutional(conn)
     all_margin = _load_all_margin(conn)
+    all_monthly = _load_all_monthly_revenue(conn)
+    all_tags = _load_all_tags(conn)
 
     all_rows = []
     for symbol in symbols:
@@ -79,6 +85,23 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
         chip_feats = _get_chip_features(symbol, all_inst, all_margin, feats.index)
         for col in ["foreign_net_60d", "trust_net_60d", "margin_balance_chg", "short_balance_chg"]:
             feats[col] = chip_feats.get(col, pd.Series(dtype=float))
+
+        # 月營收特徵
+        monthly_feats = _get_monthly_rev_timeseries(symbol, all_monthly, feats.index)
+        for col in ["rev_consecutive_yoy", "rev_accel"]:
+            if col in monthly_feats:
+                feats[col] = monthly_feats[col]
+            else:
+                feats[col] = 0.0
+
+        # 大師共識評分（逐 row 計算，用當下已知的 fund/tech + 靜態 tags）
+        feats["agent_score"] = _calc_agent_score_timeseries(feats, symbol, all_tags)
+
+        # 極端值 clip（避免影響 XGBoost split 品質）
+        if "pe_ratio" in feats.columns:
+            feats["pe_ratio"] = feats["pe_ratio"].clip(lower=0, upper=200)
+        if "pb_ratio" in feats.columns:
+            feats["pb_ratio"] = feats["pb_ratio"].clip(lower=0, upper=30)
 
         feats["symbol"] = symbol
         all_rows.append(feats)
@@ -281,6 +304,55 @@ def _get_fund_features(symbol: str, conn, price: float | None = None) -> dict:
     """用於 predict 的即時基本面（委託給 fundamentals.py 單一來源）"""
     from fundamentals import calc_fundamentals
     return calc_fundamentals(symbol, conn, price=price)
+
+
+def _load_all_tags(conn) -> dict:
+    """載入所有 stock_tags → {symbol: [{tag, sub_tag}, ...]}"""
+    rows = conn.execute("SELECT symbol, tag, sub_tag FROM stock_tags").fetchall()
+    result = {}
+    for r in rows:
+        s = r[0]
+        if s not in result:
+            result[s] = []
+        result[s].append({"tag": r[1], "sub_tag": r[2]})
+    return result
+
+
+def _calc_agent_score_timeseries(feats: pd.DataFrame, symbol: str, all_tags: dict) -> pd.Series:
+    """
+    對每一列（每個日期）計算 agent_score。
+    注意：訓練時 agent 用的 fund 是當下時序的（已無 lookahead bias），tags 是靜態的。
+    """
+    from agents import apply_agents
+    tags = all_tags.get(symbol, [])
+    scores = []
+    for _, row in feats.iterrows():
+        fund = {
+            "roe": row.get("roe"),
+            "debt_ratio": row.get("debt_ratio"),
+            "revenue_yoy": row.get("revenue_yoy"),
+            "ni_yoy": row.get("ni_yoy"),
+            "pe_ratio": row.get("pe_ratio"),
+            "pb_ratio": row.get("pb_ratio"),
+            "eps_ttm": row.get("eps_ttm"),
+        }
+        # NaN → None
+        fund = {k: (None if pd.isna(v) else v) for k, v in fund.items()}
+        tech = {
+            "return20d": None if pd.isna(row.get("return20d", float("nan"))) else row.get("return20d"),
+            "sma20_bias": None if pd.isna(row.get("sma20_bias", float("nan"))) else row.get("sma20_bias"),
+        }
+        monthly = {
+            "rev_consecutive_yoy": row.get("rev_consecutive_yoy", 0) or 0,
+            "rev_accel": bool(row.get("rev_accel", 0)),
+        }
+        ctx = {"fund": fund, "tech": tech, "monthly": monthly, "tags": tags}
+        try:
+            r = apply_agents(ctx)
+            scores.append(r["agent_score"])
+        except Exception:
+            scores.append(0.5)
+    return pd.Series(scores, index=feats.index)
 
 
 def _load_all_monthly_revenue(conn) -> dict:
