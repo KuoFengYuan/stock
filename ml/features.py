@@ -22,16 +22,20 @@ FEATURE_COLS = [
     "vol_ratio",
     "return20d", "return60d",
     "atr_pct",
+    # 動能 / 型態
+    "momentum_12_1",       # 12-1 月動量
+    "rs_pctile_60d",       # 60 日報酬在全市場的百分位
+    "dist_from_52w_high",  # 距離 52 週高點 %（負值，越接近 0 越強）
+    "new_high_20d",        # 突破 20 日新高旗標
+    "consolidation_tight", # 20 日區間緊縮旗標（VCP 型態）
     # 基本面（已修正 lookahead bias）
     "eps_ttm", "roe", "debt_ratio", "revenue_yoy", "ni_yoy",
     "pe_ratio", "pb_ratio",
-    # 月營收特徵（新增）
+    # 月營收特徵
     "rev_consecutive_yoy", "rev_accel",
     # 籌碼面（foreign_net_60d/trust_net_60d 覆蓋率僅 30%，已移除避免噪音）
     "margin_balance_chg",
     "short_balance_chg",
-    # 大師共識評分（0-1，7 位投資大師平均權重）
-    "agent_score",
 ]
 
 
@@ -48,7 +52,6 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
     all_inst = _load_all_institutional(conn)
     all_margin = _load_all_margin(conn)
     all_monthly = _load_all_monthly_revenue(conn)
-    all_tags = _load_all_tags(conn)
 
     all_rows = []
     for symbol in symbols:
@@ -94,9 +97,6 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
             else:
                 feats[col] = 0.0
 
-        # 大師共識評分（逐 row 計算，用當下已知的 fund/tech + 靜態 tags）
-        feats["agent_score"] = _calc_agent_score_timeseries(feats, symbol, all_tags)
-
         # 極端值 clip（避免影響 XGBoost split 品質）
         if "pe_ratio" in feats.columns:
             feats["pe_ratio"] = feats["pe_ratio"].clip(lower=0, upper=200)
@@ -113,6 +113,10 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
         return pd.DataFrame()
 
     result = pd.concat(all_rows).reset_index().rename(columns={"index": "date"})
+
+    # rs_pctile_60d：每個交易日，用 return60d 在全市場的百分位（0~100）
+    result["rs_pctile_60d"] = result.groupby("date")["return60d"].rank(pct=True) * 100
+
     return result
 
 
@@ -152,6 +156,24 @@ def _calc_price_features(df: pd.DataFrame) -> pd.DataFrame:
     atr = ta.atr(df["high"], df["low"], close, length=14)
     if atr is not None:
         feats["atr_pct"] = atr / close.replace(0, np.nan) * 100
+
+    # 12-1 月動量：跳過最近 22 個交易日避免短期反轉
+    # (close[-22] / close[-252]) - 1
+    feats["momentum_12_1"] = (close.shift(22) / close.shift(252) - 1) * 100
+
+    # 距離 52 週（250 日）高點（負值，越接近 0 越強勢）
+    high_52w = close.rolling(250, min_periods=60).max()
+    feats["dist_from_52w_high"] = (close / high_52w - 1) * 100
+
+    # 突破 20 日新高（用昨日以前的 20 日最高價比今天）
+    high_20d_prev = close.rolling(20).max().shift(1)
+    feats["new_high_20d"] = (close > high_20d_prev).astype(float)
+
+    # 20 日區間緊縮：(20 日 high - 20 日 low) / close < 10% → VCP 型態
+    high_20 = df["high"].rolling(20).max()
+    low_20 = df["low"].rolling(20).min()
+    range_pct = (high_20 - low_20) / close.replace(0, np.nan) * 100
+    feats["consolidation_tight"] = (range_pct < 10).astype(float)
 
     return feats
 
@@ -304,55 +326,6 @@ def _get_fund_features(symbol: str, conn, price: float | None = None) -> dict:
     """用於 predict 的即時基本面（委託給 fundamentals.py 單一來源）"""
     from fundamentals import calc_fundamentals
     return calc_fundamentals(symbol, conn, price=price)
-
-
-def _load_all_tags(conn) -> dict:
-    """載入所有 stock_tags → {symbol: [{tag, sub_tag}, ...]}"""
-    rows = conn.execute("SELECT symbol, tag, sub_tag FROM stock_tags").fetchall()
-    result = {}
-    for r in rows:
-        s = r[0]
-        if s not in result:
-            result[s] = []
-        result[s].append({"tag": r[1], "sub_tag": r[2]})
-    return result
-
-
-def _calc_agent_score_timeseries(feats: pd.DataFrame, symbol: str, all_tags: dict) -> pd.Series:
-    """
-    對每一列（每個日期）計算 agent_score。
-    注意：訓練時 agent 用的 fund 是當下時序的（已無 lookahead bias），tags 是靜態的。
-    """
-    from agents import apply_agents
-    tags = all_tags.get(symbol, [])
-    scores = []
-    for _, row in feats.iterrows():
-        fund = {
-            "roe": row.get("roe"),
-            "debt_ratio": row.get("debt_ratio"),
-            "revenue_yoy": row.get("revenue_yoy"),
-            "ni_yoy": row.get("ni_yoy"),
-            "pe_ratio": row.get("pe_ratio"),
-            "pb_ratio": row.get("pb_ratio"),
-            "eps_ttm": row.get("eps_ttm"),
-        }
-        # NaN → None
-        fund = {k: (None if pd.isna(v) else v) for k, v in fund.items()}
-        tech = {
-            "return20d": None if pd.isna(row.get("return20d", float("nan"))) else row.get("return20d"),
-            "sma20_bias": None if pd.isna(row.get("sma20_bias", float("nan"))) else row.get("sma20_bias"),
-        }
-        monthly = {
-            "rev_consecutive_yoy": row.get("rev_consecutive_yoy", 0) or 0,
-            "rev_accel": bool(row.get("rev_accel", 0)),
-        }
-        ctx = {"fund": fund, "tech": tech, "monthly": monthly, "tags": tags}
-        try:
-            r = apply_agents(ctx)
-            scores.append(r["agent_score"])
-        except Exception:
-            scores.append(0.5)
-    return pd.Series(scores, index=feats.index)
 
 
 def _load_all_monthly_revenue(conn) -> dict:

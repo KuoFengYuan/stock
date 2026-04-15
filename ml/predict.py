@@ -69,6 +69,31 @@ def run_predict():
     count = 0
     started_at = int(time.time() * 1000)
 
+    # 預先計算全市場當日 return60d 的百分位（rs_pctile_60d）
+    cur = conn.execute(
+        "SELECT symbol, close FROM stock_prices WHERE date = ?", (latest_date,)
+    ).fetchall()
+    # 取每檔 60 日前收盤
+    prev_date_row = conn.execute(
+        "SELECT DISTINCT date FROM stock_prices ORDER BY date DESC LIMIT 61"
+    ).fetchall()
+    prev_date = prev_date_row[-1]["date"] if len(prev_date_row) >= 61 else None
+    rs_map = {}
+    if prev_date:
+        prev_closes = {r["symbol"]: r["close"] for r in conn.execute(
+            "SELECT symbol, close FROM stock_prices WHERE date = ?", (prev_date,)
+        ).fetchall()}
+        rets = []
+        for r in cur:
+            p_prev = prev_closes.get(r["symbol"])
+            if p_prev and p_prev > 0:
+                rets.append((r["symbol"], (r["close"] / p_prev - 1) * 100))
+        if rets:
+            sorted_rets = sorted(rets, key=lambda x: x[1])
+            n = len(sorted_rets)
+            for i, (sym, _) in enumerate(sorted_rets):
+                rs_map[sym] = (i + 1) / n * 100
+
     for symbol in symbols:
         try:
             price_rows = conn.execute(
@@ -149,10 +174,12 @@ def run_predict():
             elif agent_result["consensus"]["bearish"] >= 5:
                 reasons.append(f"大師共識 {agent_result['consensus']['bearish']}/7 看空")
 
-            # 把 agent_score 和月營收特徵塞進 latest_feat
-            latest_feat["agent_score"] = agent_result["agent_score"]
+            # 月營收特徵塞進 latest_feat（agent_score 已不是 ML 特徵，只在規則分用）
             latest_feat["rev_consecutive_yoy"] = monthly.get("rev_consecutive_yoy", 0) or 0
             latest_feat["rev_accel"] = 1.0 if monthly.get("rev_accel") else 0.0
+
+            # rs_pctile_60d：全市場 return60d 百分位
+            latest_feat["rs_pctile_60d"] = rs_map.get(symbol, 50.0)
 
             # PE/PB clip（與訓練一致）
             if "pe_ratio" in latest_feat.columns:

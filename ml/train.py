@@ -25,8 +25,9 @@ from features import build_feature_matrix, FEATURE_COLS
 
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 MODEL_PATH = Path(__file__).parent / "model.pkl"
-FORWARD_DAYS = 60   # 中長期：60 交易日（約 3 個月）
-RELATIVE_TOP_PCT = 0.30   # 前30%相對強勢視為正例
+FORWARD_DAYS = 20   # 短期：20 交易日（約 1 個月）
+RELATIVE_TOP_PCT = 0.20   # 前20%相對強勢視為正例
+MIN_ABSOLUTE_RET = 0.05   # 且絕對報酬需 > 5%（過濾橫盤、只留真噴發）
 
 
 def _mark_exdiv_windows(price_df: pd.DataFrame, forward_days: int) -> pd.Series:
@@ -107,16 +108,15 @@ def train():
         cutoff = all_dates[-FORWARD_DAYS]
         combined = combined[combined["date"] < cutoff]
 
-    # ── 混合標籤：相對強勢前30% 且 絕對報酬 > 0 ──
-    # 純相對標籤在熊市會把「虧少的」當正例，模型學到「跌少」而非「會漲」
-    # 加入絕對報酬 > 0 的條件，確保正例真的賺錢
-    print("計算混合標籤（相對強勢 + 絕對獲利）...", flush=True)
+    # ── 混合標籤：20日 相對前20% 且 絕對報酬 > 5% ──
+    # 嚴格標籤讓模型專注學「真正會噴」的訊號，提高 AUC
+    print(f"計算混合標籤（{FORWARD_DAYS}日 top {RELATIVE_TOP_PCT:.0%} + 絕對報酬>{MIN_ABSOLUTE_RET:.0%}）...", flush=True)
     threshold_per_day = combined.groupby("date")["forward_ret"].transform(
         lambda x: x.quantile(1 - RELATIVE_TOP_PCT)
     )
     combined["label"] = (
         (combined["forward_ret"] >= threshold_per_day) &
-        (combined["forward_ret"] > 0)
+        (combined["forward_ret"] > MIN_ABSOLUTE_RET)
     ).astype(int)
     combined = combined.dropna(subset=["label"])
 
