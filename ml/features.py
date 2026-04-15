@@ -27,14 +27,28 @@ FEATURE_COLS = [
     "dist_from_52w_high",  # 距離 52 週高點 %（負值，越接近 0 越強）
     "new_high_20d",        # 突破 20 日新高旗標
     "consolidation_tight", # 20 日區間緊縮旗標（VCP 型態）
+    # 突破 / 量價（新增）
+    "breakout_with_volume",  # 突破 20 日新高 + 量比 > 1.5
+    "vol_surge",             # 量比 > 2.0（爆量）
+    "price_vol_bullish",     # 價漲量增（收盤 > 前日 + 量比 > 1.2）
+    # 警告型（新增）
+    "distribution_flag",     # 高檔出貨：近 5 日內創 20 日新高後，近 3 日量縮 + 跌
+    "near_high_weak_rsi",    # 接近 52 週高點但 RSI > 75（背離風險）
+    "vol_dry_down",          # 跌破 60 日低點 + 量縮（資金離場）
     # 基本面（已修正 lookahead bias）
     "eps_ttm", "roe", "debt_ratio", "revenue_yoy", "ni_yoy",
     "pe_ratio", "pb_ratio",
     # 月營收特徵
     "rev_consecutive_yoy", "rev_accel",
-    # 籌碼面（foreign_net_60d/trust_net_60d 覆蓋率僅 30%，已移除避免噪音）
+    # 籌碼面
     "margin_balance_chg",
     "short_balance_chg",
+    # 短線籌碼（新增）
+    "foreign_net_10d",       # 外資 10 日淨買（股）
+    "trust_net_10d",         # 投信 10 日淨買（股）
+    "both_inst_buying_10d",  # 外資+投信 10 日同步買超旗標
+    "foreign_consec_buy",    # 外資連續買超天數（上限 10）
+    "trust_consec_buy",      # 投信連續買超天數（上限 10）
 ]
 
 
@@ -85,7 +99,12 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
             feats["pb_ratio"] = feats["pb_ratio"].where(feats["pb_ratio"] > 0)
 
         chip_feats = _get_chip_features(symbol, all_inst, all_margin, feats.index)
-        for col in ["foreign_net_60d", "trust_net_60d", "margin_balance_chg", "short_balance_chg"]:
+        for col in [
+            "foreign_net_60d", "trust_net_60d",
+            "foreign_net_10d", "trust_net_10d",
+            "both_inst_buying_10d", "foreign_consec_buy", "trust_consec_buy",
+            "margin_balance_chg", "short_balance_chg",
+        ]:
             feats[col] = chip_feats.get(col, pd.Series(dtype=float))
 
         # 月營收特徵
@@ -179,6 +198,39 @@ def _calc_price_features(df: pd.DataFrame) -> pd.DataFrame:
     low_20 = df["low"].rolling(20).min()
     range_pct = (high_20 - low_20) / close.replace(0, np.nan) * 100
     feats["consolidation_tight"] = (range_pct < 10).astype(float)
+
+    # 突破 + 量增：突破 20 日新高 且 量比 > 1.5
+    feats["breakout_with_volume"] = (
+        feats["new_high_20d"].astype(bool) & (feats["vol_ratio"] > 1.5)
+    ).astype(float)
+
+    # 爆量：量比 > 2.0
+    feats["vol_surge"] = (feats["vol_ratio"] > 2.0).astype(float)
+
+    # 價漲量增（健康上漲）：收盤 > 前日 且 量比 > 1.2
+    feats["price_vol_bullish"] = (
+        (close > close.shift(1)) & (feats["vol_ratio"] > 1.2)
+    ).astype(float)
+
+    # 高檔出貨：近 5 日曾創 20 日新高，且近 3 日均量 < 前 20 日均量 且 收盤下跌
+    had_new_high_5d = feats["new_high_20d"].rolling(5).max() > 0
+    vol3 = volume.rolling(3).mean()
+    vol20_prev = volume.shift(3).rolling(20).mean()
+    ret_3d = close.pct_change(3)
+    feats["distribution_flag"] = (
+        had_new_high_5d & (vol3 < vol20_prev * 0.8) & (ret_3d < 0)
+    ).astype(float)
+
+    # 接近 52 週高點（< 5%）但 RSI > 75（動能背離）
+    feats["near_high_weak_rsi"] = (
+        (feats["dist_from_52w_high"] > -5) & (feats["rsi14"] > 75)
+    ).astype(float)
+
+    # 跌破 60 日低點 + 量縮（資金離場）
+    low_60 = close.rolling(60).min()
+    feats["vol_dry_down"] = (
+        (close <= low_60 * 1.02) & (feats["vol_ratio"] < 0.7)
+    ).astype(float)
 
     return feats
 
@@ -311,8 +363,29 @@ def _get_chip_features(symbol: str, all_inst: pd.DataFrame, all_margin: pd.DataF
         result["foreign_net_5d"]  = inst["foreign_net"].rolling(5).sum()
         result["trust_net_5d"]    = inst["trust_net"].rolling(5).sum()
         result["total_inst_5d"]   = inst["total_net"].rolling(5).sum()
+        result["foreign_net_10d"] = inst["foreign_net"].rolling(10).sum()
+        result["trust_net_10d"]   = inst["trust_net"].rolling(10).sum()
         result["foreign_net_60d"] = inst["foreign_net"].rolling(60).sum()
         result["trust_net_60d"]   = inst["trust_net"].rolling(60).sum()
+
+        # 雙引擎：外資 10d 買 + 投信 10d 買
+        CHIP_MIN = 500_000  # 股 = 500 張
+        result["both_inst_buying_10d"] = (
+            (result["foreign_net_10d"] > CHIP_MIN) & (result["trust_net_10d"] > CHIP_MIN)
+        ).astype(float)
+
+        # 連續買超天數（上限 10 避免極端值）
+        fn = inst["foreign_net"].fillna(0)
+        tn = inst["trust_net"].fillna(0)
+        # rolling 10 日內連續為正的天數（從最近往前數）
+        def _consec_buy(s: pd.Series) -> pd.Series:
+            buy = (s > 0).astype(int)
+            # 連買天數：(當日為買) × (前一日連買 + 1)
+            grp = (buy == 0).cumsum()
+            consec = buy.groupby(grp).cumsum()
+            return consec.clip(upper=10)
+        result["foreign_consec_buy"] = _consec_buy(fn)
+        result["trust_consec_buy"]   = _consec_buy(tn)
 
     if not all_margin.empty:
         mg = all_margin[all_margin["symbol"] == symbol].set_index("date")

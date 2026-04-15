@@ -123,7 +123,13 @@ def train():
     X = combined[FEATURE_COLS].astype(float)
     X = X.replace([np.inf, -np.inf], np.nan)
     # 籌碼特徵 NaN 填 0（= 中性，因為籌碼資料覆蓋期短於價格資料）
-    CHIP_ZERO_COLS = ["foreign_net_60d", "trust_net_60d", "margin_balance_chg", "short_balance_chg"]
+    CHIP_ZERO_COLS = [
+        "foreign_net_60d", "trust_net_60d",
+        "foreign_net_10d", "trust_net_10d",
+        "both_inst_buying_10d",
+        "foreign_consec_buy", "trust_consec_buy",
+        "margin_balance_chg", "short_balance_chg",
+    ]
     for col in CHIP_ZERO_COLS:
         if col in X.columns:
             X[col] = X[col].fillna(0)
