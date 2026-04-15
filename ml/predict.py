@@ -59,9 +59,9 @@ def run_predict():
     market_env = "熊市" if market_win_rate < 0.42 else ("牛市" if market_win_rate > 0.55 else "正常")
     print(f"市場近期勝率：{market_win_rate:.1%}（{market_env}）", flush=True)
 
-    # ML 權重：AUC 0.50→0%, 0.55→30%, 0.60→50%, 0.65→70%, 0.70+→80%
-    # 線性插值：(AUC - 0.50) / 0.20 * 1.0，上限 0.80
-    ml_weight = max(0.0, min(0.80, (model_auc - 0.50) / 0.20))
+    # ML 權重：上限 0.55，讓規則引擎（含籌碼/技術）有足夠話語權
+    # AUC 0.50→0%, 0.55→20%, 0.60→35%, 0.65→50%, 0.70+→55%
+    ml_weight = max(0.0, min(0.55, (model_auc - 0.50) / 0.20 * 0.70))
     rule_weight = 1.0 - ml_weight
     print(f"模型 AUC={model_auc:.4f}，ML權重={ml_weight:.2f}，規則權重={rule_weight:.2f}", flush=True)
 
