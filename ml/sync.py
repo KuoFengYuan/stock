@@ -13,7 +13,6 @@
 import sys
 import sqlite3
 import time
-import json
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,17 +46,12 @@ ALL_STOCKS = [s for s in _ALL_STOCKS_RAW if s.endswith(".TW")]
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
-SESSION.verify = False
-requests.packages.urllib3.disable_warnings()
 
-# symbol -> 純數字代碼對照
+# symbol -> 純數字代碼對照（僅上市）
 def _code(symbol: str) -> str:
-    if symbol.endswith(".TW"):
-        return symbol[:-3]   # '2330.TW' -> '2330'
-    return symbol
+    return symbol[:-3]  # '2330.TW' -> '2330'
 
 TSE_SYMBOLS = {_code(s): s for s in ALL_STOCKS}
-OTC_SYMBOLS = {}  # 不再同步上櫃
 
 
 def get_conn():
@@ -211,22 +205,24 @@ def _twse_date_str(d: date) -> str:
     """轉成 TWSE 日期格式 YYYYMMDD"""
     return d.strftime("%Y%m%d")
 
-def _tpex_date_str(d: date) -> str:
-    """轉成 TPEX 民國年格式 YYY/MM/DD"""
-    roc_year = d.year - 1911
-    return f"{roc_year}/{d.month:02d}/{d.day:02d}"
-
-
-def fetch_twse_day(target_date: date) -> dict[str, dict]:
-    """抓 TWSE 某日全部上市股票收盤資料，回傳 {code: {open,high,low,close,volume}}"""
+def fetch_twse_day(target_date: date) -> tuple[str | None, dict[str, dict]]:
+    """抓 TWSE 當日全部上市股票收盤資料。
+    注意：STOCK_DAY_ALL 只回傳「最新交易日」，不論 date 參數；
+    實際日期以 API 回傳的 data.date 為準，避免把舊日期覆蓋成新資料。
+    回傳 (實際日期 YYYY-MM-DD, {code: {open,high,low,close,volume}})
+    """
     url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json&date={_twse_date_str(target_date)}"
     r = _retry_get(SESSION, url, label="TWSE 日K")
     if not r:
-        return {}
+        return None, {}
     try:
         data = r.json()
         if data.get("stat") != "OK":
-            return {}
+            return None, {}
+        raw_date = data.get("date")  # YYYYMMDD
+        actual_date = None
+        if raw_date and len(raw_date) == 8:
+            actual_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
         result = {}
         for row in data.get("data", []):
             code = row[0].strip()
@@ -241,56 +237,10 @@ def fetch_twse_day(target_date: date) -> dict[str, dict]:
                 result[code] = {"open": o or c, "high": h or c, "low": l or c, "close": c, "volume": vol}
             except Exception:
                 pass
-        return result
+        return actual_date, result
     except Exception as e:
         print(f"  [TWSE 日K parse ERROR] {e}", flush=True)
-        return {}
-
-
-def fetch_tpex_day(target_date: date) -> dict[str, dict]:
-    """抓 TPEX 某日全部上櫃股票收盤資料"""
-    url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={_tpex_date_str(target_date)}"
-    r = _retry_get(SESSION, url, label="TPEX 日K")
-    if not r:
-        return {}
-    try:
-        data = r.json()
-        tables = data.get("tables", [])
-        if not tables:
-            return {}
-        result = {}
-        for row in tables[0].get("data", []):
-            code = row[0].strip()
-            if code not in OTC_SYMBOLS:
-                continue
-            try:
-                def _p(s): return float(s.replace(",", "")) if s not in ("--", "", "---") else None
-                c = _p(row[2])   # 收盤
-                o = _p(row[4])   # 開盤
-                h = _p(row[5])   # 最高
-                l = _p(row[6])   # 最低
-                vol_str = row[8] if len(row) > 8 else ""
-                vol = int(vol_str.replace(",", "")) // 1000 if vol_str.replace(",", "").isdigit() else 0
-                if c is None:
-                    continue
-                result[code] = {"open": o or c, "high": h or c, "low": l or c, "close": c, "volume": vol}
-            except Exception:
-                pass
-        return result
-    except Exception as e:
-        print(f"  [TPEX parse ERROR] {e}", flush=True)
-        return {}
-
-
-def _insert_day(conn, symbol: str, date_str: str, p: dict) -> bool:
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
-            (symbol, date_str, p["open"], p["high"], p["low"], p["close"], p["volume"], p["close"])
-        )
-        return True
-    except Exception:
-        return False
+        return None, {}
 
 
 def sync_prices(conn):
@@ -314,113 +264,93 @@ def sync_prices(conn):
         # 歷史補齊：逐股逐月抓
         print(f"歷史資料不足（{covered}/{len(ALL_STOCKS)} 檔），補齊近2年...", flush=True)
         hist_start = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
-        total += _twse_tpex_history_bulk(conn, hist_start)
+        total += _twse_history_bulk(conn, hist_start)
     elif latest_in_db:
-        # 增量更新：用全市場日 API，一天一個 request 抓全部股票
+        # 增量更新：STOCK_DAY_ALL 只回傳「最新交易日」，不論 date 參數。
+        # 策略：先抓最新一天；若與 DB 最新日期有缺口，再用個股月 API 補齊中間。
         today = date.today()
-        start = datetime.strptime(latest_in_db, "%Y-%m-%d").date() + timedelta(days=1)
-        days_to_fetch = [start + timedelta(days=i) for i in range((today - start).days + 1)]
-        days_to_fetch = [d for d in days_to_fetch if d.weekday() < 5]
+        actual_date, twse_data = fetch_twse_day(today)
+        if actual_date and twse_data:
+            batch = []
+            for code, p in twse_data.items():
+                symbol = TSE_SYMBOLS.get(code)
+                if symbol:
+                    batch.append((symbol, actual_date, p["open"], p["high"], p["low"], p["close"], p["volume"], p["close"]))
+            if batch:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
+                    batch
+                )
+                conn.commit()
+                total += len(batch)
+                print(f"  {actual_date}: {len(batch)} 檔（最新交易日）", flush=True)
 
-        if days_to_fetch:
-            print(f"增量同步 {len(days_to_fetch)} 天（全市場日 API）...", flush=True)
-            print(f"@PROGRESS|prices|0|{len(days_to_fetch)}", flush=True)
-            for i, d in enumerate(days_to_fetch):
-                twse_data = fetch_twse_day(d)
-                if twse_data:
-                    date_str = d.strftime("%Y-%m-%d")
-                    batch = []
-                    for code, p in twse_data.items():
-                        symbol = TSE_SYMBOLS.get(code)
-                        if symbol:
-                            batch.append((symbol, date_str, p["open"], p["high"], p["low"], p["close"], p["volume"], p["close"]))
-                    if batch:
-                        conn.executemany(
-                            "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
-                            batch
-                        )
-                        conn.commit()
-                        total += len(batch)
-                        print(f"  {date_str}: {len(batch)} 檔", flush=True)
-                    else:
-                        print(f"  {date_str}: 休市或無資料", flush=True)
-                else:
-                    print(f"  {d.strftime('%Y-%m-%d')}: 休市或無資料", flush=True)
-                print(f"@PROGRESS|prices|{i+1}|{len(days_to_fetch)}", flush=True)
-                if i < len(days_to_fetch) - 1:
-                    time.sleep(0.3)
+            # 檢查是否有中間缺口：DB 最新日期 → API 最新日期之間還有交易日未補
+            api_date_obj = datetime.strptime(actual_date, "%Y-%m-%d").date()
+            db_date_obj = datetime.strptime(latest_in_db, "%Y-%m-%d").date()
+            if api_date_obj > db_date_obj + timedelta(days=1):
+                # 中間有缺口，用個股月 API 補
+                gap_start = db_date_obj + timedelta(days=1)
+                print(f"偵測到缺口 {gap_start} → {api_date_obj}，用個股月 API 補齊...", flush=True)
+                hist_start = gap_start.strftime("%Y-%m-%d")
+                total += _twse_history_bulk(conn, hist_start)
         else:
-            print("價格資料已是最新", flush=True)
+            print(f"  無法取得 TWSE 最新資料", flush=True)
 
     log_sync(conn, "prices", "success", total, started_at=started_at)
     print(f"價格同步完成，共新增 {total} 筆", flush=True)
     return total
 
 
-def _fetch_stock_month(code: str, is_otc: bool, ym: str) -> list:
-    """抓單一股票某月的日資料（TWSE 個股日 K API）"""
+def _fetch_stock_month(code: str, ym: str) -> list:
+    """抓單一上市股票某月的日資料（TWSE 個股日 K API）"""
     rows = []
     try:
-        if not is_otc:
-            url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={ym}01&stockNo={code}"
-            r = SESSION.get(url, timeout=10)
-            data = r.json()
-            if data.get("stat") != "OK":
-                return rows
-            # fields: 日期(民國),成交股數,成交金額,開盤價,最高價,最低價,收盤價,漲跌價差,成交筆數
-            year_base = int(ym[:4])
-            for row in data.get("data", []):
-                try:
-                    date_parts = row[0].split("/")
-                    y = int(date_parts[0]) + 1911
-                    m, d = int(date_parts[1]), int(date_parts[2])
-                    def _p(s): return float(s.replace(",", "")) if s not in ("--", "", "X") else None
-                    o, h, l, c = _p(row[3]), _p(row[4]), _p(row[5]), _p(row[6])
-                    if c is None:
-                        continue
-                    vol = int(row[1].replace(",", "")) // 1000
-                    rows.append((f"{y:04d}-{m:02d}-{d:02d}", o or c, h or c, l or c, c, vol))
-                except Exception:
-                    pass
-        else:
-            # TPEX 個股月 API
-            roc_year = int(ym[:4]) - 1911
-            roc_month = int(ym[4:])
-            url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php?l=zh-tw&o=json&d={roc_year}/{roc_month:02d}/01&stkno={code}"
-            r = SESSION.get(url, timeout=10)
-            data = r.json()
-            # fields: 日期,成交股數,成交金額,開盤,最高,最低,收盤,...
-            for row in data.get("aaData", []):
-                try:
-                    date_parts = row[0].split("/")
-                    y = int(date_parts[0]) + 1911
-                    m, d_val = int(date_parts[1]), int(date_parts[2])
-                    def _p(s): return float(s.replace(",", "")) if s not in ("--", "", "X", "---") else None
-                    o, h, l, c = _p(row[3]), _p(row[4]), _p(row[5]), _p(row[6])
-                    if c is None:
-                        continue
-                    vol = int(row[1].replace(",", "")) // 1000 if row[1].replace(",", "").isdigit() else 0
-                    rows.append((f"{y:04d}-{m:02d}-{d_val:02d}", o or c, h or c, l or c, c, vol))
-                except Exception:
-                    pass
+        url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={ym}01&stockNo={code}"
+        r = SESSION.get(url, timeout=10)
+        data = r.json()
+        if data.get("stat") != "OK":
+            return rows
+        # fields: 日期(民國),成交股數,成交金額,開盤價,最高價,最低價,收盤價,漲跌價差,成交筆數
+        for row in data.get("data", []):
+            try:
+                date_parts = row[0].split("/")
+                y = int(date_parts[0]) + 1911
+                m, d = int(date_parts[1]), int(date_parts[2])
+                def _p(s): return float(s.replace(",", "")) if s not in ("--", "", "X") else None
+                o, h, l, c = _p(row[3]), _p(row[4]), _p(row[5]), _p(row[6])
+                if c is None:
+                    continue
+                vol = int(row[1].replace(",", "")) // 1000
+                rows.append((f"{y:04d}-{m:02d}-{d:02d}", o or c, h or c, l or c, c, vol))
+            except Exception:
+                pass
     except Exception:
         pass
     return rows
 
 
-def _twse_tpex_history_bulk(conn, start_date: str) -> int:
+def _twse_history_bulk(conn, start_date: str) -> int:
     """
-    用 TWSE + TPEX 個股月日 K API 並發補齊全市場歷史價格
+    用 TWSE 個股日 K API 並發補齊上市歷史價格。
+    已有完整月份（>= stock_prices 該月實際交易日數）跳過。
     """
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     today = date.today()
 
-    # 統計各 (symbol, YYYY-MM) 已有的交易日數，>=15 天視為完整，跳過重下
+    # 統計各 (symbol, YYYY-MM) 已有的交易日數
     month_counts: dict[str, int] = {}
     for row in conn.execute(
         "SELECT symbol, substr(date,1,7) as ym, COUNT(*) as cnt FROM stock_prices GROUP BY symbol, ym"
     ).fetchall():
         month_counts[f"{row[0]}_{row[1]}"] = row[2]
+
+    # 每個月的全市場實際交易日數（用 stock_prices 裡 distinct date 推斷）
+    market_days_per_month: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT substr(date,1,7) as ym, COUNT(DISTINCT date) FROM stock_prices GROUP BY ym"
+    ).fetchall():
+        market_days_per_month[row[0]] = row[1]
 
     # 建立要抓的 (symbol, ym) 任務清單
     months = []
@@ -436,13 +366,18 @@ def _twse_tpex_history_bulk(conn, start_date: str) -> int:
     tasks = []
     for symbol in ALL_STOCKS:
         code = _code(symbol)
-        is_otc = symbol.endswith(".TWO")
         for ym in months:
-            key = f"{symbol}_{ym[:4]}-{ym[4:]}"
-            # 最新月永遠重抓（可能有新交易日）；其他月有 >=15 天才跳過
-            if ym != last_ym and month_counts.get(key, 0) >= 15:
+            ym_key = f"{ym[:4]}-{ym[4:]}"
+            key = f"{symbol}_{ym_key}"
+            # 最新月永遠重抓（可能有新交易日）
+            if ym == last_ym:
+                tasks.append((symbol, code, ym))
                 continue
-            tasks.append((symbol, code, is_otc, ym))
+            # 若該檔該月筆數 >= 該月市場交易日數，視為完整，跳過
+            market_days = market_days_per_month.get(ym_key, 20)
+            if month_counts.get(key, 0) >= market_days:
+                continue
+            tasks.append((symbol, code, ym))
 
     if not tasks:
         print("  無需補齊歷史資料", flush=True)
@@ -454,11 +389,11 @@ def _twse_tpex_history_bulk(conn, start_date: str) -> int:
     batch_results = []
 
     def _dl(task):
-        symbol, code, is_otc, ym = task
-        day_rows = _fetch_stock_month(code, is_otc, ym)
+        symbol, code, ym = task
+        day_rows = _fetch_stock_month(code, ym)
         return symbol, day_rows
 
-    WORKERS = 120
+    WORKERS = 40
     BATCH_SIZE = 2000
     done = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as executor:
@@ -493,23 +428,6 @@ def _twse_tpex_history_bulk(conn, start_date: str) -> int:
 
     print(f"  TWSE+TPEX 個股歷史資料：{total} 筆", flush=True)
     return total
-
-
-def _yf_insert(conn, symbol, df) -> int:
-    count = 0
-    for d, row in df.iterrows():
-        try:
-            conn.execute(
-                "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
-                (symbol, d.strftime("%Y-%m-%d"),
-                 float(row.get("Open", 0) or 0), float(row.get("High", 0) or 0),
-                 float(row.get("Low", 0) or 0), float(row.get("Close", 0) or 0),
-                 int(row.get("Volume", 0) or 0), float(row.get("Close", 0) or 0))
-            )
-            count += 1
-        except Exception:
-            pass
-    return count
 
 
 def _fetch_finmind_eps(code: str, start_date: str) -> dict[tuple[int, int], float]:
@@ -724,47 +642,6 @@ def fetch_twse_institutional(target_date: date) -> dict[str, dict]:
         return {}
 
 
-def fetch_tpex_institutional(target_date: date) -> dict[str, dict]:
-    """TPEX 三大法人買賣超"""
-    url = "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php"
-    try:
-        r = SESSION.post(url, data={"l": "zh-tw", "o": "json", "se": "EW", "t": "D", "d": _tpex_date_str(target_date)}, timeout=15)
-        import json as _json
-        data = _json.loads(r.content.decode("utf-8"))
-        tables = data.get("tables", [])
-        if not tables:
-            return {}
-        # 24 欄位順序（實測）：
-        # [0]代號 [1]名稱
-        # [2-4]  外資(不含陸資) 買/賣/淨
-        # [5-7]  外資(含陸資)   買/賣/淨
-        # [8-10] 外資合計       買/賣/淨
-        # [11-13] 自營(自行)    買/賣/淨
-        # [14-16] 自營(避險)    買/賣/淨
-        # [17-19] 投信          買/賣/淨
-        # [20-22] 自營合計      買/賣/淨
-        # [23]   三大法人合計淨買
-        result = {}
-        for row in tables[0].get("data", []):
-            code = row[0].strip()
-            if code not in OTC_SYMBOLS:
-                continue
-            try:
-                def _n(s): return int(s.replace(",", "").replace(" ", "") or 0)
-                result[code] = {
-                    "foreign_net": _n(row[4]),
-                    "trust_net":   _n(row[19]),
-                    "dealer_net":  _n(row[22]),
-                    "total_net":   _n(row[23]),
-                }
-            except Exception:
-                pass
-        return result
-    except Exception as e:
-        print(f"  [TPEX 三大法人 ERROR] {e}", flush=True)
-        return {}
-
-
 def fetch_twse_margin(target_date: date) -> dict[str, dict]:
     """TWSE 個股融資融券餘額"""
     url = f"https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json&date={_twse_date_str(target_date)}&selectType=ALL"
@@ -838,12 +715,23 @@ def sync_chips(conn):
         max_price_date = max(trading_days) if trading_days else ""
         dates_to_fill += [d for d in new_dates if d.strftime("%Y-%m-%d") in trading_days or (d.strftime("%Y-%m-%d") > max_price_date and d.weekday() < 5)]
 
-        # 補回中間空洞：有價格資料但沒有籌碼的交易日
+        # 補回中間空洞：(1) 完全沒資料 (2) 筆數 < stock_prices 80%
         hole_rows = conn.execute(
-            "SELECT DISTINCT date FROM stock_prices WHERE date >= ? AND date <= ? AND date NOT IN (SELECT DISTINCT date FROM institutional) ORDER BY date",
+            """
+            SELECT p.date, COUNT(DISTINCT p.symbol) AS price_cnt,
+                   (SELECT COUNT(*) FROM institutional i WHERE i.date = p.date) AS inst_cnt
+            FROM stock_prices p
+            WHERE p.date >= ? AND p.date <= ?
+            GROUP BY p.date
+            HAVING inst_cnt = 0 OR inst_cnt < price_cnt * 0.8
+            ORDER BY p.date
+            """,
             (price_start.strftime("%Y-%m-%d"), latest_in_db)
         ).fetchall()
         hole_dates = [datetime.strptime(r[0], "%Y-%m-%d").date() for r in hole_rows]
+        incomplete_count = sum(1 for r in hole_rows if r[2] > 0)
+        if incomplete_count > 0:
+            print(f"偵測到 {incomplete_count} 天籌碼資料不完整（< 80%），一併重抓", flush=True)
         existing_set = set(dates_to_fill)
         for hd in hole_dates:
             if hd not in existing_set:
@@ -1064,74 +952,6 @@ def sync_monthly_revenue(conn):
     return total
 
 
-def sync_otc_prices_yf(conn):
-    """用 yfinance 補齊上櫃 (OTC) 股票缺失的價格資料"""
-    import yfinance as yf
-
-    otc_missing = conn.execute("""
-        SELECT s.symbol FROM stocks s
-        WHERE s.market = 'OTC'
-        AND NOT EXISTS (SELECT 1 FROM stock_prices p WHERE p.symbol = s.symbol)
-    """).fetchall()
-
-    if not otc_missing:
-        print("上櫃價格已完整，無需補齊", flush=True)
-        return 0
-
-    symbols = [r[0] for r in otc_missing]
-    print(f"用 yfinance 補齊 {len(symbols)} 檔上櫃股票價格（近2年）...", flush=True)
-    total = 0
-
-    # 分批下載（yfinance 支援多檔同時下載）
-    BATCH = 50
-    for i in range(0, len(symbols), BATCH):
-        batch = symbols[i:i+BATCH]
-        tickers = " ".join(batch)
-        try:
-            df = yf.download(tickers, period="2y", group_by="ticker", progress=False, threads=True)
-        except Exception as e:
-            print(f"  [WARN] batch {i//BATCH+1}: {e}", flush=True)
-            continue
-
-        for sym in batch:
-            try:
-                if len(batch) == 1:
-                    stock_df = df
-                else:
-                    stock_df = df[sym] if sym in df.columns.get_level_values(0) else None
-                if stock_df is None or stock_df.empty:
-                    continue
-                stock_df = stock_df.dropna(subset=["Close"])
-                count = 0
-                for d, row in stock_df.iterrows():
-                    dt = d[0] if isinstance(d, tuple) else d
-                    try:
-                        o = float(row.get("Open", 0) or 0)
-                        h = float(row.get("High", 0) or 0)
-                        l = float(row.get("Low", 0) or 0)
-                        c = float(row.get("Close", 0) or 0)
-                        v = int(row.get("Volume", 0) or 0) // 1000  # 股 -> 張
-                        if c <= 0:
-                            continue
-                        conn.execute(
-                            "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
-                            (sym, dt.strftime("%Y-%m-%d"), o, h, l, c, v, c)
-                        )
-                        count += 1
-                    except Exception:
-                        pass
-                total += count
-            except Exception:
-                pass
-
-        conn.commit()
-        pct = min(100, (i + BATCH) * 100 // len(symbols))
-        print(f"  進度 {min(i+BATCH, len(symbols))}/{len(symbols)} ({pct}%)，累計 {total} 筆", flush=True)
-
-    print(f"上櫃價格補齊完成，共 {total} 筆", flush=True)
-    return total
-
-
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     conn = get_conn()
@@ -1141,7 +961,6 @@ if __name__ == "__main__":
 
     if mode in ("prices", "prices_chips", "all"):
         sync_prices(conn)
-        sync_otc_prices_yf(conn)  # 補齊 TPEX 被 WAF 擋的上櫃股票
 
     if mode in ("financials", "all"):
         sync_financials(conn)
