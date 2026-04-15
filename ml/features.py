@@ -9,7 +9,6 @@
 import sqlite3
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
@@ -122,28 +121,28 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
 
 def _calc_price_features(df: pd.DataFrame) -> pd.DataFrame:
     close = df["close"]
+    high = df["high"]
+    low = df["low"]
     volume = df["volume"]
     feats = pd.DataFrame(index=df.index)
 
-    rsi14 = ta.rsi(close, length=14)
-    rsi6 = ta.rsi(close, length=6)
-    feats["rsi14"] = rsi14
-    feats["rsi6"] = rsi6
+    # RSI14（向量化 Wilder smoothing，比 pandas_ta 快很多）
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    feats["rsi14"] = 100 - 100 / (1 + rs)
 
-    macd = ta.macd(close, fast=12, slow=26, signal=9)
-    if macd is not None and not macd.empty:
-        feats["macd"] = macd.get("MACD_12_26_9")
-        feats["macd_signal"] = macd.get("MACDs_12_26_9")
-        feats["macd_hist"] = macd.get("MACDh_12_26_9")
+    # Bollinger Band Position：(close - lower) / (upper - lower)
+    sma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    upper = sma20 + 2 * std20
+    lower = sma20 - 2 * std20
+    feats["bb_pos"] = (close - lower) / (upper - lower).replace(0, np.nan)
 
-    bb = ta.bbands(close, length=20, std=2)
-    if bb is not None and not bb.empty:
-        bbp_col = next((c for c in bb.columns if c.startswith("BBP_")), None)
-        if bbp_col:
-            feats["bb_pos"] = bb[bbp_col]
-
-    sma20 = ta.sma(close, length=20)
-    sma60 = ta.sma(close, length=60)
+    sma60 = close.rolling(60).mean()
     feats["sma20_bias"] = (close - sma20) / sma20.replace(0, np.nan) * 100
     feats["sma60_bias"] = (close - sma60) / sma60.replace(0, np.nan) * 100
 
@@ -153,9 +152,15 @@ def _calc_price_features(df: pd.DataFrame) -> pd.DataFrame:
     feats["return20d"] = close.pct_change(20) * 100
     feats["return60d"] = close.pct_change(60) * 100
 
-    atr = ta.atr(df["high"], df["low"], close, length=14)
-    if atr is not None:
-        feats["atr_pct"] = atr / close.replace(0, np.nan) * 100
+    # ATR%（向量化 Wilder smoothing）
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    atr14 = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    feats["atr_pct"] = atr14 / close.replace(0, np.nan) * 100
 
     # 12-1 月動量：跳過最近 22 個交易日避免短期反轉
     # (close[-22] / close[-252]) - 1

@@ -7,6 +7,8 @@ function getPython(): string {
   const candidates = [
     `${home}/miniconda3/envs/stock/bin/python`,
     '/usr/local/miniconda3/envs/stock/bin/python',
+    '/opt/homebrew/Caskroom/miniconda/base/envs/stock/bin/python',
+    '/opt/miniconda3/envs/stock/bin/python',
     'python3',
     'python',
   ]
