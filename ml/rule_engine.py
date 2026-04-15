@@ -141,6 +141,10 @@ def calc_indicators(df: pd.DataFrame) -> dict:
     elif len(close) >= 60:
         result["low_1y"] = float(df["low"].min())
 
+    # 60 日低點（資金離場偵測用）
+    if len(close) >= 60:
+        result["low_60d"] = float(df["low"].tail(60).min())
+
     # 12-1 月動量（CANSLIM RS 用，跳過最近 1 個月避免短期反轉）
     if len(close) >= 252:
         result["momentum_12_1"] = float((close.iloc[-22] / close.iloc[-252] - 1) * 100)
@@ -321,6 +325,22 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     _pe_early = fund.get("pe_ratio")
     if _pe_early is not None and _pe_early > 60:
         return [f"⚠ PE {_pe_early:.0f} 過高"], "neutral", 0.20
+
+    # 新增：近期弱勢前置過濾
+    # 條件 A：return60d < -20% 且均線空頭排列 → 強制 neutral
+    # 條件 B：長期均線空頭排列（MA20<MA60<MA150<MA200）→ 強制 neutral（股價在大趨勢下跌中，不追基本面）
+    _r60 = tech.get("return60d")
+    _sma20 = tech.get("sma20")
+    _sma60 = tech.get("sma60")
+    _sma150 = tech.get("sma150")
+    _sma200 = tech.get("sma200")
+    short_bearish = _sma20 is not None and _sma60 is not None and _sma150 is not None \
+                    and _sma20 < _sma60 < _sma150
+    long_bearish = short_bearish and _sma200 is not None and _sma150 < _sma200
+    if _r60 is not None and _r60 < -20 and short_bearish:
+        return [f"⚠ 近60日跌 {_r60:.0f}% + 均線空頭排列"], "neutral", 0.25
+    if long_bearish:
+        return ["⚠ 均線完全空頭排列（MA20<MA60<MA150<MA200）"], "neutral", 0.25
 
     # == 第一層：基本面品質 → 加分 ==
     score = 0.40  # 底分
@@ -587,14 +607,35 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
             reasons.append(f"趨勢健康 {m_score}/8")
             score += 0.02
         elif m_score <= 2:
+            reasons.append(f"⚠ 趨勢疲弱 {m_score}/8")
+            score -= 0.05
+        elif m_score <= 4:
             score -= 0.02
     else:
         sma60 = tech.get("sma60")
         if sma60 and close:
             if close >= sma60 * 0.95:
                 score += 0.01
+            elif close < sma60 * 0.85:
+                reasons.append("⚠ 跌破 60 日均線 15%")
+                score -= 0.05
             else:
                 score -= 0.02
+
+    # 60 日新低 + 量縮（資金離場）→ 扣分
+    low_60d = tech.get("low_60d")
+    vol_ratio = tech.get("vol_ratio")
+    if low_60d is not None and close <= low_60d * 1.02 and vol_ratio is not None and vol_ratio < 0.7:
+        reasons.append("⚠ 60 日低點 + 量縮（資金離場）")
+        score -= 0.05
+
+    # 短期均線空頭排列（MA20<MA60<MA150）且基本面好 → 避免追加，額外扣分
+    _sma20_chk = tech.get("sma20")
+    _sma60_chk = tech.get("sma60")
+    _sma150_chk = tech.get("sma150")
+    if _sma20_chk and _sma60_chk and _sma150_chk and _sma20_chk < _sma60_chk < _sma150_chk:
+        reasons.append("⚠ 均線空頭排列（MA20<MA60<MA150）")
+        score -= 0.06
 
     if rs_pctile is not None:
         if rs_pctile >= 90:

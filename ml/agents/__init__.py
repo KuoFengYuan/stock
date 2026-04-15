@@ -66,6 +66,12 @@ def apply_agents(ctx: dict) -> dict:
     bonus = (agent_score - 0.5) * 0.25  # 最多 ±0.125，但我們 clip 到 ±0.05
     bonus = max(-0.05, min(0.05, bonus))
 
+    # 動能派否決：Druckenmiller 看空時（股價 / 趨勢弱），不讓基本面派給正向 bonus
+    # 理由：基本面好但股價持續下跌，市場通常已 price-in 壞消息
+    druckenmiller_res = next((d for d in details if d["name"] == "Druckenmiller"), None)
+    if druckenmiller_res and druckenmiller_res["signal"] == "bearish" and bonus > 0:
+        bonus = 0.0
+
     return {
         "agent_score": round(agent_score, 3),
         "consensus": consensus,
