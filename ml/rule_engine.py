@@ -519,7 +519,24 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
         v = abs(val) / 1000
         return f"{v:,.0f}張"
 
-    if foreign_buying and trust_selling:
+    # 雙引擎：外資+投信 10 日同步買超（短線最強訊號）
+    if foreign_buying and trust_buying:
+        reasons.append(f"外資+投信10日雙買 +{_chip_str(foreign_10d)}／+{_chip_str(trust_10d)}")
+        score += 0.05
+    elif foreign_buying and not trust_selling:
+        # 外資 10 日單邊買超（投信中性）
+        f_abs = abs(foreign_10d)
+        if f_abs > CHIP_MIN_ABS * 2:  # >1000 張
+            reasons.append(f"外資10日買超 +{_chip_str(foreign_10d)}")
+            score += 0.03
+        else:
+            reasons.append(f"外資10日買超 +{_chip_str(foreign_10d)}")
+            score += 0.02
+    elif trust_buying and not foreign_selling:
+        # 投信 10 日單邊買超（外資中性）
+        reasons.append(f"投信10日買超 +{_chip_str(trust_10d)}")
+        score += 0.03
+    elif foreign_buying and trust_selling:
         f, t = abs(foreign_10d), abs(trust_10d)
         if t > f * 3:
             reasons.append(f"⚠ 投信大賣 -{_chip_str(trust_10d)}／外資小買 +{_chip_str(foreign_10d)}（近10日）")
@@ -552,10 +569,10 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
         score -= 0.01
     elif f_consec_buy >= 5:
         reasons.append(f"外資連續買超 {f_consec_buy} 日")
-        score += 0.02
+        score += 0.04
     elif f_consec_buy >= 3:
         reasons.append(f"外資連續買超 {f_consec_buy} 日")
-        score += 0.01
+        score += 0.02
 
     if t_consec_sell >= 5:
         reasons.append(f"⚠ 投信連續賣超 {t_consec_sell} 日")
@@ -565,10 +582,10 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
         score -= 0.01
     elif t_consec_buy >= 5:
         reasons.append(f"投信連續買超 {t_consec_buy} 日")
-        score += 0.02
+        score += 0.04
     elif t_consec_buy >= 3:
         reasons.append(f"投信連續買超 {t_consec_buy} 日")
-        score += 0.01
+        score += 0.02
 
     dealer_10d = tech.get("dealer_net_10d")
     if dealer_10d is not None and abs(dealer_10d) > CHIP_MIN_ABS:
