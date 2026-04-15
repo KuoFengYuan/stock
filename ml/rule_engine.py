@@ -343,7 +343,7 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
         return ["⚠ 均線完全空頭排列（MA20<MA60<MA150<MA200）"], "neutral", 0.25
 
     # == 第一層：基本面品質 → 加分 ==
-    score = 0.40  # 底分
+    score = 0.35  # 底分（從 0.40 降；基本面不該單獨決定分數）
 
     fund_signals: list[tuple[str, float]] = []
 
@@ -390,9 +390,9 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     if not has_fundamental:
         return [], "neutral", 0.20
 
-    # 遞減加成
+    # 遞減加成（降權：基本面好是門票，不該直接給高分）
     fund_signals.sort(key=lambda x: x[1], reverse=True)
-    decay_weights = [1.0, 0.5, 0.3, 0.15, 0.1]
+    decay_weights = [0.7, 0.4, 0.2, 0.1, 0.05]
     for i, (rule_name, excess) in enumerate(fund_signals):
         if rule_name in _SUPPRESSED_RULES:
             continue
@@ -552,7 +552,21 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
             reasons.append(f"投信買超 +{_chip_str(trust_10d)}／外資賣超 -{_chip_str(foreign_10d)}（近10日）")
 
     if chip_warning:
+        # 同步賣超用乘數懲罰（才壓得過強基本面的高底分）
         reasons.append(f"⚠ 法人近10日同步賣超（外資 -{_chip_str(foreign_10d)} 投信 -{_chip_str(trust_10d)}）")
+        score *= 0.85
+    elif foreign_selling and not trust_buying:
+        # 外資單邊 10 日賣超（投信中性或未知）
+        f_abs = abs(foreign_10d)
+        if f_abs > CHIP_MIN_ABS * 4:  # >2000 張
+            reasons.append(f"⚠ 外資10日大賣 -{_chip_str(foreign_10d)}")
+            score *= 0.92
+        else:
+            reasons.append(f"⚠ 外資10日賣超 -{_chip_str(foreign_10d)}")
+            score -= 0.03
+    elif trust_selling and not foreign_buying:
+        # 投信單邊 10 日賣超（外資中性或未知）
+        reasons.append(f"⚠ 投信10日賣超 -{_chip_str(trust_10d)}")
         score -= 0.03
 
     # 連續買賣超（即使 60 日淨買，近期連續賣也要提醒）
