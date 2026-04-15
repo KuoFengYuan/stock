@@ -538,16 +538,23 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
         score += 0.03
     elif foreign_buying and trust_selling:
         f, t = abs(foreign_10d), abs(trust_10d)
-        if t > f * 3:
+        # 投信賣 > 外資買 → 淨流出，視為負面
+        if t > f * 2:
             reasons.append(f"⚠ 投信大賣 -{_chip_str(trust_10d)}／外資小買 +{_chip_str(foreign_10d)}（近10日）")
-            score -= 0.02
+            score *= 0.92
+        elif t > f:
+            reasons.append(f"⚠ 投信賣超 -{_chip_str(trust_10d)}／外資買超 +{_chip_str(foreign_10d)}（近10日，淨流出）")
+            score -= 0.03
         else:
             reasons.append(f"外資買超 +{_chip_str(foreign_10d)}／投信賣超 -{_chip_str(trust_10d)}（近10日）")
     elif foreign_selling and trust_buying:
         f, t = abs(foreign_10d), abs(trust_10d)
-        if f > t * 3:
+        if f > t * 2:
             reasons.append(f"⚠ 外資大賣 -{_chip_str(foreign_10d)}／投信小買 +{_chip_str(trust_10d)}（近10日）")
-            score -= 0.02
+            score *= 0.92
+        elif f > t:
+            reasons.append(f"⚠ 外資賣超 -{_chip_str(foreign_10d)}／投信買超 +{_chip_str(trust_10d)}（近10日，淨流出）")
+            score -= 0.03
         else:
             reasons.append(f"投信買超 +{_chip_str(trust_10d)}／外資賣超 -{_chip_str(foreign_10d)}（近10日）")
 
