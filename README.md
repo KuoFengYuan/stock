@@ -129,6 +129,45 @@ watch_thresh = 0.50 + (market_win_rate − 0.50) × 0.30
 
 ---
 
+## AI 模型分數說明（ml_sub_scores，0-1）
+
+前端表格的 **AI 模型** 4 個 bar，來自 [train.py](ml/train.py) 訓練的 4 個 XGBoost，分別回答「這檔多值得買」的不同角度。
+
+| Bar | 模型 | 類型 | 學的是 |
+|------|------|------|--------|
+| **綜（main）** | XGBRanker（全 48 特徵） | pairwise ranker | 全市場每日排序能力（sigmoid 後取 0-1） |
+| **動（breakout）** | XGBClassifier（24 動能特徵） | 分類 | 「未來 20 日能突破噴發」的機率 |
+| **值（value）** | XGBClassifier（13 估值/基本面特徵） | 分類 | 「價值回歸帶動上漲」的機率 |
+| **籌（chip）** | XGBClassifier（15 籌碼/事件特徵） | 分類 | 「主力建倉後上漲」的機率 |
+
+### 怎麼解讀
+
+- **4 個都高（> 0.6）** → 多模型共識，信心最強
+- **只有某 1 個特別高** → 特定 pattern 訊號，看你偏好哪派
+- **main 高但其他低** → 綜合排序看好，但沒有明確的單一催化劑
+
+### 前端「預設風格按鈕」對應
+
+| 按鈕 | 排序依據 |
+|------|---------|
+| ⚡ 動能派 | `ml_sub_scores.breakout` |
+| 💎 價值派 | `ml_sub_scores.value` |
+| ⚖️ 均衡派 | `final_score`（綜合 ensemble） |
+| 🏛 跟主力 | `ml_sub_scores.chip` |
+
+### Ensemble → final_score
+
+4 個子模型的分數會依大盤環境加權平均成 `ml_score`，再與規則分數混合：
+
+```
+ml_score    = main×w1 + breakout×w2 + value×w3 + chip×w4   # 權重依牛/熊/正常市動態調整
+final_score = ml_score × ml_weight + rule_score × rule_weight
+```
+
+詳細權重表見上方「動態 Ensemble 權重」。
+
+---
+
 ## 特徵工程（48 維）
 
 | 類別 | 特徵 |
