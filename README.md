@@ -243,91 +243,126 @@ final_score = ml_score × ml_weight + rule_score × rule_weight
 
 # 📖 使用教學
 
-## 初次設置
+## 第一次部署（完整流程）
 
-### 1. 安裝環境
+> 全程約 30-60 分鐘，首次資料同步最花時間。以下指令**從專案根目錄依序執行**。
+
+### Step 1 — 安裝依賴
 
 ```bash
-# Node.js 相依
+# Node.js（前端）
 npm install
 
-# Python 環境（conda env: stock）
-conda create -n stock python=3.12
+# Python 環境（conda env 名稱：stock）
+conda create -n stock python=3.12 -y
 conda activate stock
 pip install -r ml/requirements.txt
 ```
 
-### 2. 首次資料同步（約 10-30 分鐘）
+### Step 2 — 資料同步（首次 10-30 分鐘）
 
 ```bash
-# 完整同步（價格/法人/融資券/財報/月營收/TAIFEX）
+# 一次抓齊：上市股票清單 + 2 年日 K + 法人 + 融資券 + 財報 + 月營收 + TAIFEX
 conda run -n stock python3 ml/sync.py all
 ```
 
-或透過前端：啟動 dev server → 首頁按「同步資料」。
+完成後 `data/stock.db` 約 50-200 MB。可用下列指令驗證：
 
-### 3. 訓練模型（需至少 200 筆資料）
+```bash
+conda run -n stock python3 -c "
+import sqlite3; c=sqlite3.connect('data/stock.db')
+for t in ['stocks','stock_prices','institutional','financials','monthly_revenue','futures_positions']:
+    n = c.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]
+    print(f'{t}: {n}')"
+```
+
+### Step 3 — 訓練模型（約 15 分鐘）
 
 ```bash
 conda run -n stock python3 ml/train.py
 ```
 
-訓練 4 個模型（main ranker + breakout / value / chip），約 15 分鐘。
+訓練 4 個 XGBoost 模型（main ranker + breakout / value / chip），輸出 `ml/model.pkl`。
+Console 會印出各模型 AUC 和 hit@20，確認 main AUC > 0.58 較穩。
 
-### 4. 產生推薦
+### Step 4 — 產生推薦（約 1-2 分鐘）
 
 ```bash
 conda run -n stock python3 ml/predict.py
 ```
 
-或前端按「AI 分析」。
+每天幫全市場 1000+ 檔評分，寫入 `recommendations` 表。
 
-### 5. 啟動前端
+### Step 5 — 啟動前端
 
 ```bash
-./dev.sh     # 本機開發 (port 3000)
+./dev.sh
+```
+
+`dev.sh` 會：
+- 殺掉舊的 port 3000 process
+- 啟動 Next.js dev server
+
+瀏覽器打開 [http://localhost:3000](http://localhost:3000) 即可看到推薦清單。
+
+### Step 6 — 設定每日自動排程（推薦）
+
+```bash
+chmod +x scripts/daily.sh scripts/weekly.sh
+crontab -e
+```
+
+貼入（把 `/path/to/stock_a` 換成你的絕對路徑，例如 `$HOME/stock_a`）：
+
+```cron
+# 工作日 19:00 同步 + 推薦
+0 19 * * 1-5 cd /path/to/stock_a && ./scripts/daily.sh >> logs/cron.log 2>&1
+# 週六 12:00 重訓（資料累積一週後重新學習）
+0 12 * * 6   cd /path/to/stock_a && ./scripts/weekly.sh >> logs/cron.log 2>&1
+```
+
+排程完成後 **Step 2-4 會自動跑**，每天只要打開前端看即可。
+
+### Step 7（選用）— 正式部署到 GCP Linux Server
+
+```bash
+./deploy-gcp.sh
+```
+
+`deploy-gcp.sh` 會：
+- `git pull` → `npm install` → `npm run build`
+- 以 production mode 啟動 Next.js（port 3031）
+- 套用 nginx 設定 + reload（HTTPS / port 443 → 3031）
+
+> 前提：已安裝 nginx + 申請 Let's Encrypt 憑證 + DNS 指到這台 server。
+
+---
+
+## 環境時區與排程建議
+
+Server 建議設台灣時區（確保 cron 在 19:00 跑到的是台股收盤後）：
+
+```bash
+sudo timedatectl set-timezone Asia/Taipei
 ```
 
 ---
 
 ## 日常使用
 
-### 自動排程（推薦）
-
-一次設定，每天自動跑。編輯 crontab：
-
-```bash
-crontab -e
-```
-
-加入（把 `/path/to/stock_a` 換成實際路徑）：
-
-```cron
-# 每個工作日 19:00 同步 + 推薦
-0 19 * * 1-5 cd /path/to/stock_a && ./scripts/daily.sh >> logs/cron.log 2>&1
-
-# 每週六 12:00 重訓
-0 12 * * 6   cd /path/to/stock_a && ./scripts/weekly.sh >> logs/cron.log 2>&1
-```
-
-建議 server 時區設為台灣：
-
-```bash
-sudo timedatectl set-timezone Asia/Taipei
-```
-
-詳細設定見 [`scripts/README.md`](scripts/README.md)。
+### 如果已設 cron（Step 6）
+什麼都不用做。打開前端看推薦即可。
 
 ### 手動執行
 
 ```bash
-chmod +x scripts/daily.sh scripts/weekly.sh
-
-./scripts/daily.sh      # 只跑同步 + 推薦
-./scripts/weekly.sh     # 含重訓
+./scripts/daily.sh      # 同步 + 推薦（約 5 分鐘）
+./scripts/weekly.sh     # 含重訓（約 20 分鐘）
 ```
 
-Log 輸出在 `logs/`。
+Log 輸出在 `logs/daily-*.log` / `logs/weekly-*.log`。
+
+詳細設定見 [`scripts/README.md`](scripts/README.md)。
 
 ---
 
@@ -354,12 +389,14 @@ Log 輸出在 `logs/`。
 
 點下按鈕會同時「設 dim filter + 切換排序基準」：
 
-| 按鈕 | 排序基準 | Filter 門檻 |
+| 按鈕 | 排序基準（ML × 規則混合） | Filter 門檻 |
 |------|---------|------------|
-| ⚡ 動能派 Top 20 | `ml_sub_scores.breakout`（動能模型） | 動能 ≥ 70, 籌碼 ≥ 60, 基本面 ≥ 50 |
-| 💎 價值派 Top 20 | `ml_sub_scores.value`（價值模型） | 基本面 ≥ 70, 估值 ≥ 60 |
+| ⚡ 動能派 Top 20 | `breakout × 0.55 + dim.momentum × 0.45` | 動能 ≥ 70, 籌碼 ≥ 60, 基本面 ≥ 50 |
+| 💎 價值派 Top 20 | `value × 0.50 + dim.valuation × 0.50` | 基本面 ≥ 70, 估值 ≥ 60 |
 | ⚖️ 均衡派 Top 20 | `final_score`（綜合 ensemble） | 基本面/動能/籌碼 各 ≥ 60 |
-| 🏛 跟主力 Top 30 | `ml_sub_scores.chip`（籌碼模型） | 籌碼 ≥ 80 |
+| 🏛 跟主力 Top 30 | `chip × 0.40 + dim.chip × 0.60`（規則權重較高） | 籌碼 ≥ 80 |
+
+ML 模型 AUC 越低，規則權重越重（降低單一模型 bias）。
 
 #### Slider 自訂篩選
 - **基本面**：ROE、獲利、營收、Piotroski 綜合

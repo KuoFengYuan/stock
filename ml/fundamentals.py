@@ -60,13 +60,17 @@ def calc_fundamentals(symbol: str, conn, price: float | None = None) -> dict:
                     eps_parts.append(r["eps"])
                 elif r.get("net_income") is not None and shares and shares > 0:
                     eps_parts.append(r["net_income"] / shares)
+                else:
+                    # 某季 eps 與 net_income 都缺 → TTM 不完整，放棄
+                    eps_parts = []
+                    break
         else:
             # 不連續：從 latest 開始，只加總連續的季度
             rows_by_yq = {(r["year"], r["quarter"]): r for r in rows}
             for y, q in expected:
                 r = rows_by_yq.get((y, q))
                 if r is None:
-                    eps_parts = []  # 放棄，TTM 不可信
+                    eps_parts = []
                     break
                 if r.get("eps") is not None:
                     eps_parts.append(r["eps"])
@@ -76,7 +80,8 @@ def calc_fundamentals(symbol: str, conn, price: float | None = None) -> dict:
                     eps_parts = []
                     break
 
-    if eps_parts:
+    # 必須完整 4 季才給 eps_ttm（避免低估）
+    if len(eps_parts) == 4:
         result["eps_ttm"] = sum(eps_parts)
 
     # 去年同期 EPS TTM（PEG 計算用）
@@ -90,9 +95,9 @@ def calc_fundamentals(symbol: str, conn, price: float | None = None) -> dict:
         if eps_prev:
             result["eps_ttm_prev"] = sum(eps_prev)
 
-    # TTM 淨利
+    # TTM 淨利（需完整 4 季才給，避免低估）
     ni_list = [r["net_income"] for r in rows[:4] if r.get("net_income") is not None]
-    if len(ni_list) >= 2:
+    if len(ni_list) == 4:
         result["ni_ttm"] = sum(ni_list)
 
     # Equity
@@ -102,9 +107,12 @@ def calc_fundamentals(symbol: str, conn, price: float | None = None) -> dict:
         result["equity"] = equity_cur
 
     # ROE（TTM 淨利 / 平均 equity）
+    # Clip 到 [-100, 300]：淨值被大幅侵蝕 / 股本極小時，原始 ROE 會爆炸（-500%）
+    # 這類極端值財務上無意義、顯示誤導，直接截斷
     if ni_list and equity_cur and equity_cur > 0:
         avg_eq = (equity_cur + equity_prev) / 2 if equity_prev and equity_prev > 0 else equity_cur
-        result["roe"] = sum(ni_list) / avg_eq * 100
+        roe_raw = sum(ni_list) / avg_eq * 100
+        result["roe"] = max(-100.0, min(roe_raw, 300.0))
 
     # 負債比
     ta = latest.get("total_assets")

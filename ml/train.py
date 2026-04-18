@@ -47,7 +47,8 @@ BREAKOUT_FEATURES = [
 
 VALUE_FEATURES = [
     # 估值 + 基本面
-    "pe_ratio", "pb_ratio", "eps_ttm", "pe_pct_in_industry",
+    "pe_ratio", "pb_ratio", "peg_ratio",           # 加 PEG 校正成長率
+    "eps_ttm", "pe_pct_in_industry",
     "roe", "debt_ratio", "revenue_yoy", "ni_yoy",
     "rev_consecutive_yoy", "rev_accel",
     "market_return_60d", "beta_60d",
@@ -164,7 +165,7 @@ def train():
 
     X = combined[FEATURE_COLS].astype(float)
     X = X.replace([np.inf, -np.inf], np.nan)
-    # 籌碼特徵 NaN 填 0（= 中性，因為籌碼資料覆蓋期短於價格資料）
+    # 籌碼特徵 NaN 填 0（= 中性，因為籌碼資料覆蓋期短於價格資料，0 有語意）
     CHIP_ZERO_COLS = [
         "foreign_net_60d", "trust_net_60d",
         "foreign_net_10d", "trust_net_10d",
@@ -176,9 +177,10 @@ def train():
     for col in CHIP_ZERO_COLS:
         if col in X.columns:
             X[col] = X[col].fillna(0)
-    # 其餘特徵用訓練集中位數填補 NaN（訓練時計算，預測時重用）
-    feature_medians = X.median()
-    X = X.fillna(feature_medians)
+    # 基本面特徵（PE/PEG/ROE/ni_yoy 等）NaN 保留
+    # XGBoost 內建處理 NaN（自動學 split 方向），比用 median 填補更準
+    # 虧損股 PE=NaN 被填 median=20 會誤導模型以為「估值正常」
+    feature_medians = X.median()  # 仍計算供 bundle 儲存（相容舊 predict）
     y = combined["label"]
 
     pos_rate = y.mean()

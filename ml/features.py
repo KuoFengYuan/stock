@@ -38,6 +38,7 @@ FEATURE_COLS = [
     # 基本面（已修正 lookahead bias）
     "eps_ttm", "roe", "debt_ratio", "revenue_yoy", "ni_yoy",
     "pe_ratio", "pb_ratio",
+    "peg_ratio",             # PE / ni_yoy（成長率校正估值，< 1 偏低估）
     # 月營收特徵
     "rev_consecutive_yoy", "rev_accel",
     # 籌碼面
@@ -142,6 +143,14 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
             feats["pe_ratio"] = feats["pe_ratio"].clip(lower=0, upper=200)
         if "pb_ratio" in feats.columns:
             feats["pb_ratio"] = feats["pb_ratio"].clip(lower=0, upper=30)
+
+        # PEG = PE / ni_yoy（只在 ni_yoy > 5% 時有意義，否則 NaN）
+        # clip 到 [0, 10]：PEG < 1 偏低估、1-2 合理、> 3 偏貴
+        if "pe_ratio" in feats.columns and "ni_yoy" in feats.columns:
+            ni_yoy_pos = feats["ni_yoy"].where(feats["ni_yoy"] > 5, np.nan)
+            feats["peg_ratio"] = (feats["pe_ratio"] / ni_yoy_pos).clip(0, 10)
+        else:
+            feats["peg_ratio"] = np.nan
 
         feats["symbol"] = symbol
         all_rows.append(feats)
@@ -394,12 +403,15 @@ def _get_fund_timeseries(symbol: str, all_financials: dict, date_index: pd.Datet
 
     def _rolling_ttm(col):
         s_ann = df.set_index("announce_date")[col]
-        ttm = s_ann.rolling(4, min_periods=2).sum()
-        return ttm.reindex(full_index).ffill().bfill().reindex(date_index)
+        # 必須 4 季才算 TTM（避免低估），只 ffill（ffill 是「公告後沿用」，無 lookahead）
+        # 之前的 bfill 會用未來公告的 TTM 填過去空值 → lookahead bias，已移除
+        ttm = s_ann.rolling(4, min_periods=4).sum()
+        return ttm.reindex(full_index).ffill().reindex(date_index)
 
     def _latest(col):
         s_ann = df.set_index("announce_date")[col]
-        return s_ann.reindex(full_index).ffill().bfill().reindex(date_index)
+        # 同樣移除 bfill 避免 lookahead
+        return s_ann.reindex(full_index).ffill().reindex(date_index)
 
     eps_ttm = _rolling_ttm("eps")
     ni_ttm = _rolling_ttm("net_income")

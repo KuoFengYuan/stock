@@ -457,7 +457,8 @@ function Table({ items }: { items: RecommendationItem[] }) {
               <Th label="漲跌" k="changePct" sk={sk} asc={asc} sort={sort} />
               <Th label="成交量" k="volume" sk={sk} asc={asc} sort={sort} />
               <Th label="評分" k="score" sk={sk} asc={asc} sort={sort} />
-              <th className="text-center py-2 px-3 font-medium whitespace-nowrap" title="基本面 / 動能 / 籌碼 / 估值 四維度分數 0-100">維度</th>
+              <th className="text-right py-2 px-3 font-medium whitespace-nowrap" title="本益比 PE = 股價 / EPS TTM（顏色依 PEG 分級，有 PEG 資料時更準）">PE</th>
+              <th className="text-right py-2 px-3 font-medium whitespace-nowrap" title="PEG = PE / 獲利年增率 YoY%（&lt;1 偏低估、1-2 合理、&gt;2 偏貴）">PEG</th>
               <th className="text-center py-2 px-3 font-medium whitespace-nowrap" title="ML 四模型看多機率：綜合排名 / 動能突破 / 價值估值 / 主力籌碼">AI模型</th>
               <th className="text-center py-2 px-3 font-medium whitespace-nowrap">訊號</th>
               <th className="text-center py-2 px-3 font-medium whitespace-nowrap" title="7 位投資大師（Buffett / Graham / Munger / Fisher / Druckenmiller / Wood / Ackman）共識">大師</th>
@@ -487,7 +488,8 @@ function Table({ items }: { items: RecommendationItem[] }) {
                 </td>
                 <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap">{it.volume ? it.volume.toLocaleString() : '-'}</td>
                 <td className="py-2 px-3 text-right whitespace-nowrap"><Score v={it.score} /></td>
-                <td className="py-2 px-3 text-center whitespace-nowrap"><DimBars d={it.dimScores} /></td>
+                <td className="py-2 px-3 text-right font-mono tabular-nums whitespace-nowrap"><PeCell pe={it.peRatio} peg={it.pegRatio} /></td>
+                <td className="py-2 px-3 text-right font-mono tabular-nums whitespace-nowrap"><PegCell peg={it.pegRatio} /></td>
                 <td className="py-2 px-3 text-center whitespace-nowrap"><MlBars m={it.mlSubScores} /></td>
                 <td className="py-2 px-3 text-center whitespace-nowrap"><Signal s={it.signal} /></td>
                 <td className="py-2 px-3 text-center whitespace-nowrap"><Consensus c={it.agentConsensus} d={it.agentDetails} /></td>
@@ -600,6 +602,29 @@ function DimSlider({ label, value, onChange, color }: {
       <span className="w-6 text-right font-mono">{value}</span>
     </label>
   )
+}
+
+function PeCell({ pe, peg }: { pe?: number | null; peg?: number | null }) {
+  if (pe == null) return <span className="text-slate-700">-</span>
+  // 顏色依 PEG 分級（若有）；沒 PEG 時依 PE 絕對值
+  let cls = 'text-slate-300'
+  if (peg != null) {
+    if (peg < 1) cls = 'text-emerald-400'          // 低估（成長股）
+    else if (peg < 2) cls = 'text-slate-300'        // 合理
+    else cls = 'text-red-400'                       // 偏貴
+  } else {
+    if (pe < 15) cls = 'text-emerald-400'
+    else if (pe < 30) cls = 'text-slate-300'
+    else if (pe < 60) cls = 'text-amber-400'
+    else cls = 'text-red-400'
+  }
+  return <span className={cls}>{pe.toFixed(1)}</span>
+}
+
+function PegCell({ peg }: { peg?: number | null }) {
+  if (peg == null) return <span className="text-slate-700">-</span>
+  const cls = peg < 1 ? 'text-emerald-400' : peg < 2 ? 'text-slate-300' : 'text-red-400'
+  return <span className={cls} title={peg < 1 ? 'PEG < 1 偏低估' : peg < 2 ? 'PEG 1-2 合理' : 'PEG > 2 偏貴'}>{peg.toFixed(2)}</span>
 }
 
 function MlBars({ m }: { m?: { main: number; breakout: number; value: number; chip: number } | null }) {

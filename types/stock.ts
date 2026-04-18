@@ -85,6 +85,8 @@ export interface RecommendationItem {
   // 基本面
   peRatio?: number
   pbRatio?: number
+  pegRatio?: number | null
+  niYoy?: number | null
   roe?: number
   // 技術面
   rsi14?: number

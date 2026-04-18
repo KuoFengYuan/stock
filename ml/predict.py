@@ -135,6 +135,14 @@ def run_predict():
             for k, v in fund.items():
                 latest_feat[k] = v
 
+            # PEG = PE / ni_yoy（與訓練邏輯一致，ni_yoy > 5 才算）
+            _pe = fund.get("pe_ratio")
+            _ni_yoy = fund.get("ni_yoy")
+            if _pe and _ni_yoy and _ni_yoy > 5:
+                latest_feat["peg_ratio"] = max(0.0, min(10.0, _pe / _ni_yoy))
+            else:
+                latest_feat["peg_ratio"] = np.nan
+
             # 籌碼：與訓練時一致，用 rolling 60日 sum
             inst_rows = conn.execute(
                 "SELECT date, foreign_net, trust_net, total_net FROM institutional WHERE symbol=? ORDER BY date DESC LIMIT 65",
@@ -196,27 +204,36 @@ def run_predict():
             # rs_pctile_60d：全市場 return60d 百分位
             latest_feat["rs_pctile_60d"] = rs_map.get(symbol, 50.0)
 
-            # PE/PB clip（與訓練一致）
-            if "pe_ratio" in latest_feat.columns:
-                latest_feat["pe_ratio"] = latest_feat["pe_ratio"].clip(lower=0, upper=200)
-            if "pb_ratio" in latest_feat.columns:
-                latest_feat["pb_ratio"] = latest_feat["pb_ratio"].clip(lower=0, upper=30)
-
             # 補齊缺失特徵
             for col in feature_cols:
                 if col not in latest_feat.columns:
                     latest_feat[col] = np.nan
 
-            X = latest_feat[feature_cols].astype(float)
+            # X 是給 ML 用（需 clip 與訓練一致），latest_feat 保留原始值供 features_json 顯示
+            X = latest_feat[feature_cols].astype(float).copy()
+            if "pe_ratio" in X.columns:
+                X["pe_ratio"] = X["pe_ratio"].clip(lower=0, upper=200)
+            if "pb_ratio" in X.columns:
+                X["pb_ratio"] = X["pb_ratio"].clip(lower=0, upper=30)
+
+            # 籌碼類特徵 NaN 填 0（0 有「中性」語意）
+            CHIP_ZERO_COLS = {
+                "foreign_net_60d", "trust_net_60d",
+                "foreign_net_10d", "trust_net_10d",
+                "both_inst_buying_10d",
+                "foreign_consec_buy", "trust_consec_buy",
+                "margin_balance_chg", "short_balance_chg",
+                "foreign_fut_net_oi", "foreign_fut_oi_chg_5d",
+            }
+            for col in CHIP_ZERO_COLS:
+                if col in X.columns:
+                    X[col] = X[col].fillna(0)
+            # 其他基本面特徵保留 NaN，讓 XGBoost 自動處理
             if X.isnull().all(axis=1).iloc[0]:
                 continue
 
-            # 用訓練集中位數填補（比即時中位數更穩定）
-            if feature_medians:
-                for col in feature_cols:
-                    if pd.isna(X[col].iloc[0]) and col in feature_medians:
-                        X[col] = feature_medians[col]
-            X = X.fillna(0)  # 仍有殘餘 NaN 則填 0
+            # 不再用 median 填補 — XGBoost 內建 NaN 處理
+            # 虧損股 PE=NaN、衰退股 PEG=NaN 保留 NaN，模型能學到這類 pattern
 
             # 多模型 ensemble
             if multi_mode:
@@ -270,10 +287,15 @@ def run_predict():
                 agent_result["consensus"]["bullish"] >= 5
             )
 
-            features_dict = {
-                col: (float(X[col].iloc[0]) if not pd.isna(X[col].iloc[0]) else None)
-                for col in feature_cols
-            }
+            # 用原始 latest_feat（未填補 median）存 features_json，避免前端顯示誤導
+            # 例：虧損股 eps_ttm<0 時 pe 應為 None，而不是填成訓練集 median
+            features_dict = {}
+            for col in feature_cols:
+                if col in latest_feat.columns:
+                    v = latest_feat[col].iloc[0]
+                    features_dict[col] = float(v) if pd.notna(v) else None
+                else:
+                    features_dict[col] = None
             features_dict["agent_score"] = agent_result["agent_score"]
             features_dict["agent_consensus"] = agent_result["consensus"]
             features_dict["agent_details"] = agent_result["details"]

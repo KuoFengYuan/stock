@@ -118,6 +118,10 @@ export async function GET(req: NextRequest) {
     let agentDetails: Array<{ name: string; signal: string; confidence: number; reasons: string[] }> | null = null
     let dimScores: { fundamental: number; momentum: number; chip: number; valuation: number; consensus: number } | null = null
     let mlSubScores: { main: number; breakout: number; value: number; chip: number; weights?: Record<string, number> } | null = null
+    let peRatio: number | null = null
+    let pbRatio: number | null = null
+    let pegRatio: number | null = null
+    let niYoy: number | null = null
     if (row.features_json) {
       try {
         const f = JSON.parse(row.features_json)
@@ -125,6 +129,10 @@ export async function GET(req: NextRequest) {
         if (f.agent_details) agentDetails = f.agent_details
         if (f.dim_scores) dimScores = f.dim_scores
         if (f.ml_sub_scores && typeof f.ml_sub_scores === 'object') mlSubScores = f.ml_sub_scores
+        peRatio = typeof f.pe_ratio === 'number' ? f.pe_ratio : null
+        pbRatio = typeof f.pb_ratio === 'number' ? f.pb_ratio : null
+        pegRatio = typeof f.peg_ratio === 'number' ? f.peg_ratio : null
+        niYoy = typeof f.ni_yoy === 'number' ? f.ni_yoy : null
       } catch { /* ignore */ }
     }
 
@@ -143,6 +151,10 @@ export async function GET(req: NextRequest) {
       agentDetails,
       dimScores,
       mlSubScores,
+      peRatio,
+      pbRatio,
+      pegRatio,
+      niYoy,
     }
   })
 
