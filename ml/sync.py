@@ -131,6 +131,17 @@ def _init_tables(conn):
             foreign_short_oi INTEGER,
             foreign_net_oi INTEGER
         );
+
+        -- AI 概念股標籤（內容由 sync_tags.py 填寫，此處先建表避免 purge 時找不到）
+        CREATE TABLE IF NOT EXISTS stock_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            sub_tag TEXT,
+            UNIQUE(symbol, tag, sub_tag)
+        );
+        CREATE INDEX IF NOT EXISTS idx_stock_tags_symbol ON stock_tags(symbol);
+        CREATE INDEX IF NOT EXISTS idx_stock_tags_tag ON stock_tags(tag);
     """)
 
 
