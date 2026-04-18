@@ -24,7 +24,7 @@ import yfinance as yf
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
 
 
-def _retry_get(session, url, timeout=15, retries=2, delay=3, label="API"):
+def _retry_get(session, url, timeout=30, retries=3, delay=3, label="API"):
     """帶 retry 的 GET 請求"""
     for attempt in range(retries + 1):
         try:
@@ -46,6 +46,9 @@ ALL_STOCKS = [s for s in _ALL_STOCKS_RAW if s.endswith(".TW")]
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
+SESSION.verify = False  # TWSE 有時憑證不完整（Missing Subject Key Identifier）
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # symbol -> 純數字代碼對照（僅上市）
 def _code(symbol: str) -> str:
@@ -120,6 +123,14 @@ def _init_tables(conn):
             UNIQUE(symbol, year, month)
         );
         CREATE INDEX IF NOT EXISTS idx_monthly_rev_symbol ON monthly_revenue(symbol, year DESC, month DESC);
+
+        -- TAIFEX 外資期貨淨未平倉（大盤方向領先指標，單位：口）
+        CREATE TABLE IF NOT EXISTS futures_positions (
+            date TEXT PRIMARY KEY,
+            foreign_long_oi INTEGER,
+            foreign_short_oi INTEGER,
+            foreign_net_oi INTEGER
+        );
     """)
 
 
@@ -192,8 +203,15 @@ def sync_stock_list(conn):
 
     conn.commit()
 
-    # VACUUM 回收磁碟空間（每次 sync 完會整理）
-    conn.execute("VACUUM")
+    # VACUUM 很貴（重寫整個 DB 檔），只在 DB 大於 1.5GB 時才跑
+    import os
+    try:
+        db_size = os.path.getsize(DB_PATH)
+        if db_size > 1_500_000_000:
+            print(f"  DB 大小 {db_size/1e9:.2f}GB > 1.5GB，執行 VACUUM 回收空間...", flush=True)
+            conn.execute("VACUUM")
+    except Exception:
+        pass
 
     print(f"股票清單：{count} 檔", flush=True)
     return count
@@ -243,6 +261,58 @@ def fetch_twse_day(target_date: date) -> tuple[str | None, dict[str, dict]]:
         return None, {}
 
 
+def fetch_twse_mi_index(target_date: date) -> tuple[str | None, dict[str, dict]]:
+    """抓 TWSE MI_INDEX 指定日全市場日K資料（可抓歷史日期）。
+    比 STOCK_DAY_ALL 強，可傳指定日期抓歷史資料。
+    假日會回傳空資料。
+    回傳 (實際日期 YYYY-MM-DD, {code: {open,high,low,close,volume}})
+    """
+    url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={_twse_date_str(target_date)}&type=ALL"
+    r = _retry_get(SESSION, url, label=f"TWSE MI {target_date}")
+    if not r:
+        return None, {}
+    try:
+        data = r.json()
+        if data.get("stat") != "OK":
+            return None, {}
+        raw_date = data.get("date")
+        actual_date = None
+        if raw_date and len(raw_date) == 8:
+            actual_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
+        tables = data.get("tables", [])
+        # Table 8 是「每日收盤行情（全部）」
+        # fields: [證券代號, 證券名稱, 成交股數, 成交筆數, 成交金額, 開盤價, 最高價, 最低價, 收盤價, ...]
+        target_table = None
+        for t in tables:
+            fields = t.get("fields", [])
+            if len(fields) >= 9 and "證券代號" in fields[0] and "開盤" in str(fields[5]):
+                target_table = t
+                break
+        if not target_table:
+            return actual_date, {}
+        result = {}
+        for row in target_table.get("data", []):
+            code = row[0].strip()
+            if code not in TSE_SYMBOLS:
+                continue
+            try:
+                def _p(s):
+                    s = s.strip() if isinstance(s, str) else s
+                    return float(s.replace(",", "")) if s not in ("--", "", "---") else None
+                vol_str = row[2].replace(",", "")
+                vol = int(vol_str) // 1000 if vol_str.isdigit() else 0
+                o, h, l, c = _p(row[5]), _p(row[6]), _p(row[7]), _p(row[8])
+                if c is None:
+                    continue
+                result[code] = {"open": o or c, "high": h or c, "low": l or c, "close": c, "volume": vol}
+            except Exception:
+                pass
+        return actual_date, result
+    except Exception as e:
+        print(f"  [TWSE MI parse ERROR] {e}", flush=True)
+        return None, {}
+
+
 def sync_prices(conn):
     """
     同步策略：
@@ -261,10 +331,10 @@ def sync_prices(conn):
     need_bulk = not latest_in_db or covered < len(ALL_STOCKS) * 0.5
 
     if need_bulk:
-        # 歷史補齊：逐股逐月抓
+        # 歷史補齊：用 MI_INDEX 指定日 API（一天一個 request 抓全市場）
         print(f"歷史資料不足（{covered}/{len(ALL_STOCKS)} 檔），補齊近2年...", flush=True)
-        hist_start = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
-        total += _twse_history_bulk(conn, hist_start)
+        hist_start = (datetime.now() - timedelta(days=730)).date()
+        total += _twse_mi_history_bulk(conn, hist_start)
     elif latest_in_db:
         # 增量更新：STOCK_DAY_ALL 只回傳「最新交易日」，不論 date 參數。
         # 策略：先抓最新一天；若與 DB 最新日期有缺口，再用個股月 API 補齊中間。
@@ -289,11 +359,10 @@ def sync_prices(conn):
             api_date_obj = datetime.strptime(actual_date, "%Y-%m-%d").date()
             db_date_obj = datetime.strptime(latest_in_db, "%Y-%m-%d").date()
             if api_date_obj > db_date_obj + timedelta(days=1):
-                # 中間有缺口，用個股月 API 補
+                # 中間有缺口，用 MI_INDEX 指定日 API 補
                 gap_start = db_date_obj + timedelta(days=1)
-                print(f"偵測到缺口 {gap_start} → {api_date_obj}，用個股月 API 補齊...", flush=True)
-                hist_start = gap_start.strftime("%Y-%m-%d")
-                total += _twse_history_bulk(conn, hist_start)
+                print(f"偵測到缺口 {gap_start} → {api_date_obj}，用 MI_INDEX 補齊...", flush=True)
+                total += _twse_mi_history_bulk(conn, gap_start)
         else:
             print(f"  無法取得 TWSE 最新資料", flush=True)
 
@@ -330,6 +399,82 @@ def _fetch_stock_month(code: str, ym: str) -> list:
     return rows
 
 
+def _twse_mi_history_bulk(conn, start_date: date) -> int:
+    """用 MI_INDEX 指定日 API 抓歷史資料。
+    每天一個 request（全市場），比個股月 API 快 40+ 倍。
+    並行 workers=30，每天抓 ~1000 檔。
+    """
+    # 取得 DB 中已有的 (symbol, date) pairs，跳過已存在資料
+    existing = set()
+    rows = conn.execute(
+        "SELECT symbol, date FROM stock_prices WHERE date >= ?",
+        (start_date.strftime("%Y-%m-%d"),)
+    ).fetchall()
+    for r in rows:
+        existing.add((r[0], r[1]))
+
+    # 建立日期清單（只包含工作日）
+    today = date.today()
+    days = []
+    d = start_date
+    while d <= today:
+        if d.weekday() < 5:
+            days.append(d)
+        d += timedelta(days=1)
+
+    if not days:
+        return 0
+
+    print(f"@PROGRESS|prices|0|{len(days)}", flush=True)
+    print(f"  用 MI_INDEX API 抓 {len(days)} 個工作日（全市場）...", flush=True)
+
+    def _fetch(d):
+        return fetch_twse_mi_index(d)
+
+    total = 0
+    batch_results = []
+    done = 0
+    BATCH_SIZE = 5000
+    WORKERS = 15  # TWSE 限流嚴，並發太高會 timeout
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {executor.submit(_fetch, d): d for d in days}
+        for fut in as_completed(futures):
+            actual_date, day_data = fut.result()
+            if actual_date and day_data:
+                for code, p in day_data.items():
+                    symbol = TSE_SYMBOLS.get(code)
+                    if not symbol:
+                        continue
+                    if (symbol, actual_date) in existing:
+                        continue
+                    batch_results.append((symbol, actual_date, p["open"], p["high"], p["low"], p["close"], p["volume"], p["close"]))
+            done += 1
+            if done % 10 == 0 or done == len(days):
+                pct = done * 100 // len(days)
+                print(f"@PROGRESS|prices|{done}|{len(days)}", flush=True)
+                print(f"  進度 {done}/{len(days)} ({pct}%)，暫存 {len(batch_results)} 筆", flush=True)
+            if len(batch_results) >= BATCH_SIZE:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
+                    batch_results
+                )
+                conn.commit()
+                total += len(batch_results)
+                batch_results = []
+
+    if batch_results:
+        conn.executemany(
+            "INSERT OR REPLACE INTO stock_prices (symbol, date, open, high, low, close, volume, adj_close) VALUES (?,?,?,?,?,?,?,?)",
+            batch_results
+        )
+        conn.commit()
+        total += len(batch_results)
+
+    print(f"  MI_INDEX 歷史抓取完成：{total} 筆", flush=True)
+    return total
+
+
 def _twse_history_bulk(conn, start_date: str) -> int:
     """
     用 TWSE 個股日 K API 並發補齊上市歷史價格。
@@ -345,10 +490,14 @@ def _twse_history_bulk(conn, start_date: str) -> int:
     ).fetchall():
         month_counts[f"{row[0]}_{row[1]}"] = row[2]
 
-    # 每個月的全市場實際交易日數（用 stock_prices 裡 distinct date 推斷）
+    # 用「已有最多資料的股票」作為該月交易日數的權威值（通常是同步完整的大型股）
+    # 這樣可避免部分同步成功時，用平均或自身筆數當標準而誤判為完整
     market_days_per_month: dict[str, int] = {}
     for row in conn.execute(
-        "SELECT substr(date,1,7) as ym, COUNT(DISTINCT date) FROM stock_prices GROUP BY ym"
+        """SELECT ym, MAX(cnt) FROM (
+               SELECT symbol, substr(date,1,7) as ym, COUNT(*) as cnt
+               FROM stock_prices GROUP BY symbol, ym
+           ) GROUP BY ym"""
     ).fetchall():
         market_days_per_month[row[0]] = row[1]
 
@@ -373,8 +522,9 @@ def _twse_history_bulk(conn, start_date: str) -> int:
             if ym == last_ym:
                 tasks.append((symbol, code, ym))
                 continue
-            # 若該檔該月筆數 >= 該月市場交易日數，視為完整，跳過
+            # 該月市場交易日數：取全市場最完整股票的該月筆數（大型股幾乎都滿）
             market_days = market_days_per_month.get(ym_key, 20)
+            # 該檔該月筆數必須 >= market_days 才跳過（否則視為不完整要重抓）
             if month_counts.get(key, 0) >= market_days:
                 continue
             tasks.append((symbol, code, ym))
@@ -775,12 +925,12 @@ def sync_chips(conn):
     def _fetch_margin(d):
         return _fetch_with_retry(d, "margin", fetch_twse_margin, "融資券")
 
-    # 並行抓取：法人和融資券拆成獨立任務，提高併發度
-    BATCH_SIZE = 10
+    # 並行抓取：法人和融資券拆成獨立任務
+    # 降低並發度避免 TWSE 擋住（每批 5 天 × 2 API = 10 並發，批次間 sleep）
+    BATCH_SIZE = 5
     for batch_start in range(0, len(dates_to_fill), BATCH_SIZE):
         batch = dates_to_fill[batch_start:batch_start + BATCH_SIZE]
 
-        # 每天 2 個任務（法人 + 融資券），共 BATCH_SIZE*2 個任務
         day_data = {d: {"inst": {}, "margin": {}} for d in batch}
         with ThreadPoolExecutor(max_workers=BATCH_SIZE * 2) as executor:
             futures = []
@@ -952,6 +1102,57 @@ def sync_monthly_revenue(conn):
     return total
 
 
+def sync_taifex(conn):
+    """
+    同步外資台指期未平倉（TAIFEX 領先指標）。
+    FinMind API 回傳每日各法人（自營/投信/外資）的多空未平倉餘額。
+    只保留「外資」的多空 OI 與淨 OI（口數）。
+    """
+    started_at = int(time.time() * 1000)
+    row = conn.execute("SELECT MAX(date) FROM futures_positions").fetchone()
+    if row and row[0]:
+        start_date = row[0]  # 重抓最新日（可能當日更新）
+    else:
+        start_date = (date.today() - timedelta(days=730)).strftime("%Y-%m-%d")
+
+    url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesInstitutionalInvestors&data_id=TX&start_date={start_date}"
+    r = _retry_get(SESSION, url, timeout=20, retries=2, delay=3, label="TAIFEX")
+    if not r:
+        print("TAIFEX 同步失敗", flush=True)
+        log_sync(conn, "taifex", "error", 0, error="fetch failed", started_at=started_at)
+        return 0
+    try:
+        data = r.json().get("data", [])
+    except Exception as e:
+        print(f"TAIFEX parse 失敗: {e}", flush=True)
+        log_sync(conn, "taifex", "error", 0, error=str(e), started_at=started_at)
+        return 0
+
+    # 外資識別關鍵字（中文可能被編碼顯示不出來，用寬鬆比對）
+    FOREIGN_KEYWORDS = ["外資", "外陸資", "Foreign"]
+    by_date = {}
+    for r in data:
+        inv = r.get("institutional_investors", "")
+        if not any(k in inv for k in FOREIGN_KEYWORDS):
+            continue
+        d = r["date"]
+        long_oi = int(r.get("long_open_interest_balance_volume") or 0)
+        short_oi = int(r.get("short_open_interest_balance_volume") or 0)
+        by_date[d] = (long_oi, short_oi, long_oi - short_oi)
+
+    total = 0
+    for d, (lo, so, net) in by_date.items():
+        conn.execute(
+            "INSERT OR REPLACE INTO futures_positions (date, foreign_long_oi, foreign_short_oi, foreign_net_oi) VALUES (?,?,?,?)",
+            (d, lo, so, net)
+        )
+        total += 1
+    conn.commit()
+    log_sync(conn, "taifex", "success", total, started_at=started_at)
+    print(f"TAIFEX 同步完成：{total} 筆（外資台指期 OI）", flush=True)
+    return total
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     conn = get_conn()
@@ -959,17 +1160,19 @@ if __name__ == "__main__":
     print("同步股票清單...", flush=True)
     sync_stock_list(conn)
 
-    if mode in ("prices", "prices_chips", "all"):
-        sync_prices(conn)
+    # 價格 + 籌碼：用新的統一同步引擎
+    if mode in ("prices", "prices_chips", "chips", "all"):
+        from sync_engine import sync_all
+        sync_all(conn, mode="auto")
 
     if mode in ("financials", "all"):
         sync_financials(conn)
 
-    if mode in ("chips", "prices_chips", "all"):
-        sync_chips(conn)
-
     if mode in ("monthly_revenue", "all"):
         sync_monthly_revenue(conn)
+
+    if mode in ("taifex", "all"):
+        sync_taifex(conn)
 
     conn.close()
 

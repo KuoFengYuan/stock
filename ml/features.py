@@ -49,6 +49,28 @@ FEATURE_COLS = [
     "both_inst_buying_10d",  # 外資+投信 10 日同步買超旗標
     "foreign_consec_buy",    # 外資連續買超天數（上限 10）
     "trust_consec_buy",      # 投信連續買超天數（上限 10）
+    # 中期籌碼（主力建倉中長期訊號）
+    "foreign_net_60d",       # 外資 60 日累計淨買（股）
+    "trust_net_60d",         # 投信 60 日累計淨買（股）
+    # ───── v2 新增特徵 ─────
+    # 事件窗口
+    "ex_div_window",         # 近/遠 60 日內是否發生除權息（1=5日內有）
+    "post_ex_div_recovery",  # 除權息後是否已填權（0~1，越接近 1 越強）
+    # 財報公告窗口（Q1=5/15, Q2=8/14, Q3=11/14, Q4=次年4/30）
+    "near_earnings",         # 公告前/後 5 日內
+    "earnings_drift",        # 公告後 20 日超額報酬 vs 市場
+    # 產業相對
+    "rs_vs_industry_20d",    # 20 日報酬 - 產業中位數 20 日報酬
+    "pe_pct_in_industry",    # PE 在產業內百分位（0~100，越低越便宜）
+    "industry_momentum",     # 產業中位數 20 日動能
+    # 宏觀 / 大盤
+    "market_return_20d",     # 大盤近 20 日報酬
+    "market_return_60d",     # 大盤近 60 日報酬
+    "beta_60d",              # 個股對大盤 60 日 beta
+    "rel_strength_vs_mkt",   # 近 20 日個股 return - 大盤 return
+    # TAIFEX 外資期貨部位（領先大盤 1-3 日）
+    "foreign_fut_net_oi",    # 當日外資台指期淨未平倉（口，>0 偏多，<0 偏空）
+    "foreign_fut_oi_chg_5d", # 近 5 日淨 OI 變化
 ]
 
 
@@ -124,16 +146,70 @@ def build_feature_matrix(conn=None, min_price_rows=120) -> pd.DataFrame:
         feats["symbol"] = symbol
         all_rows.append(feats)
 
-    if close_conn:
-        conn.close()
-
     if not all_rows:
+        if close_conn:
+            conn.close()
         return pd.DataFrame()
 
     result = pd.concat(all_rows).reset_index().rename(columns={"index": "date"})
 
     # rs_pctile_60d：每個交易日，用 return60d 在全市場的百分位（0~100）
     result["rs_pctile_60d"] = result.groupby("date")["return60d"].rank(pct=True) * 100
+
+    # ───── 產業相對特徵 ─────
+    # 用 stock_tags 第一個 sub_tag 當產業標籤
+    tag_rows = conn.execute("SELECT symbol, sub_tag FROM stock_tags ORDER BY id").fetchall()
+    symbol_industry = {}
+    for s, t in tag_rows:
+        if s not in symbol_industry and t:
+            symbol_industry[s] = t
+    result["_industry"] = result["symbol"].map(symbol_industry).fillna("_unknown")
+
+    # 產業中位數 return20d（產業動能）
+    industry_r20 = result.groupby(["date", "_industry"])["return20d"].transform("median")
+    result["rs_vs_industry_20d"] = (result["return20d"] - industry_r20).clip(-50, 50)
+    result["industry_momentum"] = industry_r20.clip(-30, 30)
+
+    # PE 在產業內百分位（越低越便宜）
+    result["pe_pct_in_industry"] = (
+        result.groupby(["date", "_industry"])["pe_ratio"].rank(pct=True) * 100
+    )
+
+    result = result.drop(columns=["_industry"])
+
+    # ───── 大盤特徵（全市場等權中位數代理 TAIEX）─────
+    market_r20 = result.groupby("date")["return20d"].transform("median")
+    market_r60 = result.groupby("date")["return60d"].transform("median")
+    result["market_return_20d"] = market_r20.clip(-30, 30)
+    result["market_return_60d"] = market_r60.clip(-40, 40)
+    result["rel_strength_vs_mkt"] = (result["return20d"] - market_r20).clip(-50, 50)
+
+    # beta_60d 簡化版：個股 60 日 return / 市場 60 日 return（clip 極端值）
+    # 不是嚴格統計 beta，但反映對大盤的相對彈性
+    with np.errstate(divide="ignore", invalid="ignore"):
+        beta = result["return60d"] / market_r60.replace(0, np.nan)
+    result["beta_60d"] = beta.clip(-3, 3).fillna(1.0)
+
+    # ───── TAIFEX 外資期貨（大盤方向領先指標）─────
+    fut_rows = conn.execute(
+        "SELECT date, foreign_net_oi FROM futures_positions ORDER BY date"
+    ).fetchall()
+    if fut_rows:
+        fut_df = pd.DataFrame(fut_rows, columns=["date", "foreign_fut_net_oi"])
+        fut_df["date"] = pd.to_datetime(fut_df["date"])
+        fut_df = fut_df.set_index("date").sort_index()
+        fut_df["foreign_fut_oi_chg_5d"] = fut_df["foreign_fut_net_oi"].diff(5)
+        fut_df = fut_df.reset_index()
+        result = result.merge(fut_df, on="date", how="left")
+        # 缺值填前值（假日）
+        result["foreign_fut_net_oi"] = result["foreign_fut_net_oi"].ffill().fillna(0)
+        result["foreign_fut_oi_chg_5d"] = result["foreign_fut_oi_chg_5d"].ffill().fillna(0)
+    else:
+        result["foreign_fut_net_oi"] = 0.0
+        result["foreign_fut_oi_chg_5d"] = 0.0
+
+    if close_conn:
+        conn.close()
 
     return result
 
@@ -231,6 +307,48 @@ def _calc_price_features(df: pd.DataFrame) -> pd.DataFrame:
     feats["vol_dry_down"] = (
         (close <= low_60 * 1.02) & (feats["vol_ratio"] < 0.7)
     ).astype(float)
+
+    # ───── 除權息窗口 ─────
+    # 除權息當日通常跌 2-10%（不含跌停）。台股漲跌停 10%，真正跌停 close/prev ≈ 0.90。
+    # 用 0.80 < ratio < 0.92 識別除權息，避開跌停誤判。
+    ratio = close / close.shift(1)
+    ex_div_mask = (ratio < 0.92) & (ratio > 0.80)
+    # 前後 5 日內有除權息
+    feats["ex_div_window"] = ex_div_mask.rolling(11, center=True, min_periods=1).max().fillna(0).astype(float)
+
+    # 填權度：當前價 / 除權息前一日價（ffill 60 日）
+    prev_price_at_exdiv = close.shift(1).where(ex_div_mask)
+    recent_prev_price = prev_price_at_exdiv.ffill(limit=60)
+    recovery = close / recent_prev_price
+    feats["post_ex_div_recovery"] = recovery.fillna(1.0).clip(0.5, 2.0)
+
+    # ───── 財報公告窗口 ─────
+    # 台股保守公告日：Q1=5/15, Q2=8/14, Q3=11/14, Q4=次年4/30
+    # dayofyear: 4/30=120, 5/15=135, 8/14=226, 11/14=318
+    doy = pd.Series(df.index.dayofyear, index=df.index)
+    near = (
+        (doy.sub(120).abs() <= 5) |
+        (doy.sub(135).abs() <= 5) |
+        (doy.sub(226).abs() <= 5) |
+        (doy.sub(318).abs() <= 5)
+    )
+    feats["near_earnings"] = near.astype(float)
+
+    # earnings_drift: 最近一次財報公告後 20 日累積報酬（%）
+    # 實作避免 lookahead：t 日特徵值 = (t 日前 20 日若是公告日) 的 close[t]/close[t-20] - 1
+    # 這樣「公告後 20 日報酬」只在公告日 + 20 之後才可用，再 ffill 到下次公告
+    # 公告日 tolerance ±1 天（實際公告日可能不完全對齊保守日）
+    announce_day = (
+        (doy.sub(120).abs() <= 1) |
+        (doy.sub(135).abs() <= 1) |
+        (doy.sub(226).abs() <= 1) |
+        (doy.sub(318).abs() <= 1)
+    )
+    # 20 天前是公告日時，計算近 20 日累積報酬
+    was_announce_20d_ago = announce_day.shift(20).fillna(False).astype(bool)
+    drift_raw = ((close / close.shift(20) - 1) * 100).where(was_announce_20d_ago)
+    # ffill 80 天（到下次季報公告）
+    feats["earnings_drift"] = drift_raw.ffill(limit=80).fillna(0).clip(-50, 100)
 
     return feats
 

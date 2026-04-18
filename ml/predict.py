@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from features import _calc_price_features, _get_fund_features
 from fundamentals import calc_fundamentals
 from strategies import calc_piotroski, calc_peg, calc_minervini
-from rule_engine import calc_indicators, apply_rules, calc_monthly_revenue, _calc_high_1y, _calc_market_win_rate
+from rule_engine import calc_indicators, apply_rules, calc_monthly_revenue, _calc_high_1y, _calc_market_win_rate, calc_dim_scores
 from agents import apply_agents
 
 DB_PATH = Path(__file__).parent.parent / "data" / "stock.db"
@@ -35,9 +35,23 @@ def run_predict():
 
     with open(MODEL_PATH, "rb") as f:
         bundle = pickle.load(f)
-    model = bundle["model"]
-    feature_cols = bundle["feature_cols"]
-    model_auc = bundle.get("mean_auc", 0.60)
+
+    # 新版 multi-model bundle（v4_multi）
+    multi_mode = bundle.get("version") == "v4_multi" and "models" in bundle
+    if multi_mode:
+        models = bundle["models"]  # {"main", "breakout", "value", "chip"}
+        feat_map = bundle["feature_cols"]  # dict per model
+        metrics = bundle.get("metrics", {})
+        # 全 feature 聯集（用於後續填補）
+        feature_cols = feat_map["main"]
+        model_auc = metrics.get("main", {}).get("auc", 0.60)
+        print(f"[multi-model v4] main AUC={model_auc:.3f}, hit@20 main={metrics.get('main',{}).get('hit_at_20',0):.1%} breakout={metrics.get('breakout',{}).get('hit_at_20',0):.1%} value={metrics.get('value',{}).get('hit_at_20',0):.1%} chip={metrics.get('chip',{}).get('hit_at_20',0):.1%}", flush=True)
+    else:
+        # 舊版單一模型
+        models = {"main": bundle["model"]}
+        feat_map = {"main": bundle["feature_cols"]}
+        feature_cols = bundle["feature_cols"]
+        model_auc = bundle.get("mean_auc", 0.60)
     # 訓練集中位數（比即時中位數更穩定，避免因預測樣本少而偏移）
     feature_medians = bundle.get("feature_medians", {})
 
@@ -59,14 +73,15 @@ def run_predict():
     market_env = "熊市" if market_win_rate < 0.42 else ("牛市" if market_win_rate > 0.55 else "正常")
     print(f"市場近期勝率：{market_win_rate:.1%}（{market_env}）", flush=True)
 
-    # ML 權重：上限 0.55，讓規則引擎（含籌碼/技術）有足夠話語權
-    # AUC 0.50→0%, 0.55→20%, 0.60→35%, 0.65→50%, 0.70+→55%
-    ml_weight = max(0.0, min(0.55, (model_auc - 0.50) / 0.20 * 0.70))
+    # ML 權重：v4 多模型時上限提至 0.60（ensemble 較穩），舊模型仍 0.55
+    # AUC 0.50→0%, 0.55→20%, 0.60→35%, 0.65→50%, 0.70+→60%
+    ml_cap = 0.60 if multi_mode else 0.55
+    ml_weight = max(0.0, min(ml_cap, (model_auc - 0.50) / 0.20 * 0.70))
     rule_weight = 1.0 - ml_weight
     print(f"模型 AUC={model_auc:.4f}，ML權重={ml_weight:.2f}，規則權重={rule_weight:.2f}", flush=True)
 
     symbols = [r["symbol"] for r in conn.execute("SELECT symbol FROM stocks WHERE market='TSE'").fetchall()]
-    count = 0
+    pending = []  # Top-K 決策 buffer
     started_at = int(time.time() * 1000)
 
     # 預先計算全市場當日 return60d 的百分位（rs_pctile_60d）
@@ -203,7 +218,39 @@ def run_predict():
                         X[col] = feature_medians[col]
             X = X.fillna(0)  # 仍有殘餘 NaN 則填 0
 
-            ml_score = float(model.predict_proba(X)[0, 1])
+            # 多模型 ensemble
+            if multi_mode:
+                sub_scores = {}
+                for m_name, m_obj in models.items():
+                    m_cols = feat_map[m_name]
+                    # 確保所有欄位存在
+                    X_m = X.reindex(columns=m_cols).fillna(0)
+                    if m_name == "main":
+                        # XGBRanker 回 raw score，sigmoid 轉 [0,1]
+                        raw = float(m_obj.predict(X_m)[0])
+                        sub_scores[m_name] = 1.0 / (1.0 + np.exp(-raw))
+                    else:
+                        sub_scores[m_name] = float(m_obj.predict_proba(X_m)[0, 1])
+                # 動態 ensemble 權重：依大盤環境調整各模型重要性
+                # 熊市 (win_rate<0.42): value 加重（估值安全墊）、breakout 降低（追高危險）
+                # 牛市 (win_rate>0.55): breakout 加重（主升段）、value 降低
+                # 正常: 平衡配置
+                if market_win_rate < 0.42:
+                    w_main, w_brk, w_val, w_chp = 0.35, 0.15, 0.35, 0.15
+                elif market_win_rate > 0.55:
+                    w_main, w_brk, w_val, w_chp = 0.35, 0.35, 0.15, 0.15
+                else:
+                    w_main, w_brk, w_val, w_chp = 0.40, 0.25, 0.20, 0.15
+                ml_score = (
+                    sub_scores["main"] * w_main +
+                    sub_scores.get("breakout", 0.0) * w_brk +
+                    sub_scores.get("value", 0.0) * w_val +
+                    sub_scores.get("chip", 0.0) * w_chp
+                )
+                sub_scores["weights"] = {"main": w_main, "breakout": w_brk, "value": w_val, "chip": w_chp}
+            else:
+                ml_score = float(models["main"].predict_proba(X)[0, 1])
+                sub_scores = {"main": ml_score}
 
             # 混合評分
             final_score = ml_score * ml_weight + rule_score * rule_weight
@@ -217,23 +264,11 @@ def run_predict():
             buy_thresh   = max(0.52, min(buy_thresh,   0.65))
             watch_thresh = max(0.46, min(watch_thresh, 0.58))
 
-            # 規則引擎硬性排除（無 reasons = 真 neutral）→ ML 無法救
-            # 有 reasons 的 neutral（被風險扣分壓低）→ ML 有機會拉回到 watch
-            if rule_signal == "neutral" and not reasons:
-                signal = "neutral"
-                final_score = min(final_score, 0.30)
-            elif rule_signal == "neutral" and reasons:
-                # 有基本面但被扣分壓低，ML 最多拉到 watch（不給 buy）
-                if final_score >= watch_thresh:
-                    signal = "watch"
-                else:
-                    signal = "neutral"
-            elif final_score >= buy_thresh:
-                signal = "buy"
-            elif final_score >= watch_thresh:
-                signal = "watch"
-            else:
-                signal = "neutral"
+            rs_val = rs_map.get(symbol)
+            has_strong_momentum = (
+                (rs_val is not None and rs_val >= 80) or
+                agent_result["consensus"]["bullish"] >= 5
+            )
 
             features_dict = {
                 col: (float(X[col].iloc[0]) if not pd.isna(X[col].iloc[0]) else None)
@@ -242,23 +277,92 @@ def run_predict():
             features_dict["agent_score"] = agent_result["agent_score"]
             features_dict["agent_consensus"] = agent_result["consensus"]
             features_dict["agent_details"] = agent_result["details"]
-            features_json = json.dumps(features_dict)
+            features_dict["ml_sub_scores"] = sub_scores
 
-            conn.execute(
-                """INSERT OR REPLACE INTO recommendations
-                   (symbol, date, score, signal, features_json, reasons_json, model_version, created_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (
-                    symbol, latest_date, final_score, signal,
-                    features_json, json.dumps(reasons),
-                    "xgb_v3", int(time.time() * 1000)
-                )
+            # 5 維度分數
+            dim_scores = calc_dim_scores(
+                tech, fund2, current_price, monthly=monthly,
+                minervini=None, rs_pctile=rs_val,
+                agent_result=agent_result,
             )
-            count += 1
-            print(f"  {symbol}: ml={ml_score:.2f} rule={rule_score:.2f} final={final_score:.2f} {signal}", flush=True)
+            features_dict["dim_scores"] = dim_scores
+
+            # 暫存 buffer，等全部算完再 Top-K 決定 signal
+            pending.append({
+                "symbol": symbol,
+                "final_score": final_score,
+                "ml_score": ml_score,
+                "rule_score": rule_score,
+                "rule_signal": rule_signal,
+                "reasons": reasons,
+                "features_dict": features_dict,
+                "has_strong_momentum": has_strong_momentum,
+                "buy_thresh": buy_thresh,
+                "watch_thresh": watch_thresh,
+            })
 
         except Exception as e:
             print(f"  [WARN] {symbol}: {e}", flush=True)
+
+    # ═════════════════════════════════════════
+    # Top-K 決策：先決定「資格」，再取分數前 K 為 buy
+    # ═════════════════════════════════════════
+    # 資格規則：
+    # - 規則 neutral 無 reasons → 強制 neutral（不進 Top-K）
+    # - 規則 neutral 有 reasons 無強勢 → 最多 watch（不進 Top-K）
+    # - 其他 → 進入 Top-K 排名池
+    TOP_K_BUY = 20      # 每日固定推前 20 檔
+    TOP_K_WATCH = 30    # 再 30 檔 watch（total 50）
+    # 熊市減量（系統性風險時少推薦）
+    if market_win_rate < 0.35:
+        TOP_K_BUY = 10
+        TOP_K_WATCH = 20
+
+    qualified = []
+    for p in pending:
+        if p["rule_signal"] == "neutral" and not p["reasons"]:
+            p["signal"] = "neutral"
+            p["final_score"] = min(p["final_score"], 0.30)
+        elif p["rule_signal"] == "neutral" and p["reasons"] and not p["has_strong_momentum"]:
+            # 最多 watch（但不進 buy 池）
+            p["signal"] = "watch_candidate"
+            qualified.append(p)
+        else:
+            p["signal"] = "candidate"
+            qualified.append(p)
+
+    # 排序（分數高到低）取 Top-K
+    qualified.sort(key=lambda x: x["final_score"], reverse=True)
+    # 先篩可 buy 的（signal=candidate 且 score >= buy_thresh 才能當 buy）
+    buy_picked = 0
+    watch_picked = 0
+    for p in qualified:
+        if p["signal"] == "candidate" and p["final_score"] >= p["buy_thresh"] and buy_picked < TOP_K_BUY:
+            p["signal"] = "buy"
+            buy_picked += 1
+        elif p["final_score"] >= p["watch_thresh"] and watch_picked < TOP_K_WATCH:
+            p["signal"] = "watch"
+            watch_picked += 1
+        else:
+            p["signal"] = "neutral"
+
+    print(f"\n[Top-K] 推薦 buy={buy_picked}/{TOP_K_BUY} watch={watch_picked}/{TOP_K_WATCH}（市場勝率 {market_win_rate:.0%}）", flush=True)
+
+    # 批次寫入
+    count = 0
+    for p in pending:
+        sig = p.get("signal", "neutral")
+        conn.execute(
+            """INSERT OR REPLACE INTO recommendations
+               (symbol, date, score, signal, features_json, reasons_json, model_version, created_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                p["symbol"], latest_date, p["final_score"], sig,
+                json.dumps(p["features_dict"]), json.dumps(p["reasons"]),
+                "xgb_v4_multi" if multi_mode else "xgb_v3", int(time.time() * 1000)
+            )
+        )
+        count += 1
 
     conn.commit()
     conn.execute(

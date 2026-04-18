@@ -51,6 +51,22 @@ export interface AgentConsensus {
   bearish: number
 }
 
+export interface DimScores {
+  fundamental: number
+  momentum: number
+  chip: number
+  valuation: number
+  consensus: number  // 0-7
+}
+
+export interface MlSubScores {
+  main: number       // XGBRanker 全特徵排名
+  breakout: number   // 動能/突破模型
+  value: number      // 估值/基本面模型
+  chip: number       // 籌碼/事件模型
+  weights?: { main: number; breakout: number; value: number; chip: number }
+}
+
 export interface RecommendationItem {
   symbol: string
   name: string
@@ -64,6 +80,8 @@ export interface RecommendationItem {
   tags: StockTag[]
   agentConsensus?: AgentConsensus | null
   agentDetails?: AgentDetail[] | null
+  dimScores?: DimScores | null
+  mlSubScores?: MlSubScores | null
   // 基本面
   peRatio?: number
   pbRatio?: number

@@ -287,6 +287,212 @@ def _excess_win(rule: str, fallback: float) -> float:
     return fallback
 
 
+def calc_dim_scores(tech: dict, fund: dict, close: float,
+                     monthly: dict | None = None,
+                     piotroski: dict | None = None,
+                     minervini: dict | None = None,
+                     rs_pctile: float | None = None,
+                     agent_result: dict | None = None) -> dict:
+    """
+    計算 5 個獨立維度的分數（0-100），讓使用者依自己的投資風格過濾。
+
+    回傳：
+    {
+        "fundamental": 0-100,  # 基本面（ROE、獲利、營收、Piotroski）
+        "momentum":    0-100,  # 動能（RS、趨勢、突破、回檔）
+        "chip":        0-100,  # 籌碼（外資/投信/融資）
+        "valuation":   0-100,  # 估值（PE、PB、殖利率）
+        "consensus":   0-7     # 大師共識（7 位中幾位看多）
+    }
+    """
+    # ========== 基本面分數 ==========
+    fund_score = 50.0
+    roe = fund.get("roe")
+    if roe is not None:
+        if roe >= 25:   fund_score += 25
+        elif roe >= 15: fund_score += 15
+        elif roe >= 10: fund_score += 8
+        elif roe < 5:   fund_score -= 10
+
+    rev_yoy = fund.get("revenue_yoy")
+    if rev_yoy is not None:
+        if rev_yoy >= 30:   fund_score += 15
+        elif rev_yoy >= 15: fund_score += 10
+        elif rev_yoy >= 5:  fund_score += 5
+        elif rev_yoy < -5:  fund_score -= 10
+
+    ni_yoy = fund.get("ni_yoy")
+    if ni_yoy is not None:
+        if ni_yoy >= 50:   fund_score += 15
+        elif ni_yoy >= 20: fund_score += 10
+        elif ni_yoy >= 5:  fund_score += 5
+        elif ni_yoy < -10: fund_score -= 10
+
+    pio = piotroski.get("piotroski") if piotroski else None
+    if pio is not None:
+        if pio >= 7:   fund_score += 10
+        elif pio >= 5: fund_score += 5
+        elif pio <= 2: fund_score -= 10
+
+    ni_ttm = fund.get("ni_ttm")
+    if ni_ttm is not None and ni_ttm < 0:
+        fund_score -= 30  # 虧損重扣
+
+    debt = fund.get("debt_ratio")
+    if debt is not None and debt > 70:
+        fund_score -= 10
+
+    fund_score = max(0, min(100, fund_score))
+
+    # ========== 動能分數 ==========
+    # 基礎：RS 百分位（0-100）
+    momentum_score = float(rs_pctile) if rs_pctile is not None else 50.0
+
+    # Minervini 趨勢
+    if minervini:
+        m = minervini.get("minervini", 0)
+        if m >= 7:   momentum_score += 20
+        elif m >= 5: momentum_score += 10
+        elif m <= 2: momentum_score -= 20
+
+    # 突破新高 + 量能
+    vol_ratio = tech.get("vol_ratio")
+    high_1y = tech.get("high_1y")
+    if high_1y and close >= high_1y * 0.98 and vol_ratio and vol_ratio > 1.3:
+        momentum_score += 15  # 突破新高 + 量增
+    elif high_1y and close >= high_1y * 0.92:
+        momentum_score += 5   # 接近 52 週高點
+
+    # 回檔健康（輕微回調 + 量縮）
+    r20 = tech.get("return20d")
+    if r20 is not None and -10 < r20 < 0 and vol_ratio and vol_ratio < 1.0:
+        momentum_score += 8
+
+    # 跌破月線警告
+    sma20 = tech.get("sma20")
+    if sma20 and close < sma20 * 0.90:
+        momentum_score -= 25
+
+    # 均線空頭排列
+    sma60 = tech.get("sma60")
+    sma150 = tech.get("sma150")
+    if sma20 and sma60 and sma150 and sma20 < sma60 < sma150:
+        momentum_score -= 25
+
+    # 量價背離
+    if tech.get("vol_price_divergence") == "bearish":
+        momentum_score -= 15
+
+    momentum_score = max(0, min(100, momentum_score))
+
+    # ========== 籌碼分數 ==========
+    chip_score = 50.0
+
+    # 60 日淨買強度（主力中期動向）
+    f_net_60d = tech.get("foreign_net_60d", 0) or 0
+    t_net_60d = tech.get("trust_net_60d", 0) or 0
+    total_inst_60d = f_net_60d + t_net_60d  # 單位：股
+
+    # 閾值：> 500 萬股（5000 張）= 30 分，> 100 萬股 = 15 分
+    if total_inst_60d >= 5_000_000:
+        chip_score += 30
+    elif total_inst_60d >= 2_000_000:
+        chip_score += 20
+    elif total_inst_60d >= 500_000:
+        chip_score += 10
+    elif total_inst_60d <= -2_000_000:
+        chip_score -= 20
+    elif total_inst_60d <= -500_000:
+        chip_score -= 10
+
+    # 10 日雙向買超
+    f_net_10d = tech.get("foreign_net_10d", 0) or 0
+    t_net_10d = tech.get("trust_net_10d", 0) or 0
+    if f_net_10d > 500_000 and t_net_10d > 500_000:
+        chip_score += 15  # 外資+投信同買
+
+    # 連續買超天數
+    f_consec = tech.get("foreign_consec_buy", 0) or 0
+    t_consec = tech.get("trust_consec_buy", 0) or 0
+    if f_consec >= 5:
+        chip_score += 8
+    elif f_consec >= 3:
+        chip_score += 3
+    if t_consec >= 5:
+        chip_score += 8
+    elif t_consec >= 3:
+        chip_score += 3
+
+    # 連續賣超警告
+    f_consec_sell = tech.get("foreign_consec_sell", 0) or 0
+    if f_consec_sell >= 5:
+        chip_score -= 20
+
+    # 買賣超背離
+    if f_net_10d > 500_000 and t_net_10d < -500_000:
+        chip_score -= 10  # 外資買投信賣
+    elif f_net_10d < -500_000 and t_net_10d > 500_000:
+        chip_score -= 10  # 投信買外資賣
+
+    # 融資大增（散戶追高）
+    margin_chg = tech.get("margin_balance_chg_10d")
+    if margin_chg is not None and margin_chg > 30:
+        chip_score -= 10
+    elif margin_chg is not None and margin_chg < -20:
+        chip_score += 5  # 融資減少（散戶出場）
+
+    chip_score = max(0, min(100, chip_score))
+
+    # ========== 估值分數 ==========
+    # 越便宜分數越高（低 PE、低 PB、高殖利率）
+    val_score = 50.0
+
+    pe = fund.get("pe_ratio")
+    if pe is not None and pe > 0:
+        if pe <= 12:   val_score += 25
+        elif pe <= 18: val_score += 15
+        elif pe <= 25: val_score += 5
+        elif pe <= 40: val_score -= 10
+        elif pe <= 60: val_score -= 20
+        else:          val_score -= 30
+
+    pb = fund.get("pb_ratio")
+    if pb is not None and pb > 0:
+        if pb <= 1.5:  val_score += 15
+        elif pb <= 3:  val_score += 8
+        elif pb <= 5:  val_score -= 5
+        elif pb > 10:  val_score -= 15
+
+    # 殖利率
+    div = fund.get("div_yield")
+    if div is not None:
+        if div >= 5:   val_score += 10
+        elif div >= 3: val_score += 5
+
+    # PEG（PE/成長率）— 成長股估值校正
+    if pe is not None and pe > 0 and ni_yoy is not None and ni_yoy > 0:
+        peg = pe / ni_yoy
+        if peg <= 0.5:
+            val_score += 15  # 嚴重被低估
+        elif peg <= 1:
+            val_score += 5
+
+    val_score = max(0, min(100, val_score))
+
+    # ========== 大師共識 ==========
+    consensus_bullish = 0
+    if agent_result:
+        consensus_bullish = agent_result.get("consensus", {}).get("bullish", 0)
+
+    return {
+        "fundamental": round(fund_score, 1),
+        "momentum": round(momentum_score, 1),
+        "chip": round(chip_score, 1),
+        "valuation": round(val_score, 1),
+        "consensus": consensus_bullish,
+    }
+
+
 def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = None,
                 market_win_rate: float = 0.5,
                 piotroski: dict | None = None, peg_data: dict | None = None,
@@ -322,9 +528,19 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     if ni_ttm_check is not None and ni_ttm_check < 0:
         return [], "neutral", 0.20
 
+    # PE 過高判定：綁定成長率（PEG 概念），避免錯殺高成長股
+    # - PE > 100：幾乎都是泡沫，直接降級
+    # - PE 60-100：只有在「獲利 YoY < 30%」時才降級（真正的高成長股可豁免）
     _pe_early = fund.get("pe_ratio")
-    if _pe_early is not None and _pe_early > 60:
-        return [f"⚠ PE {_pe_early:.0f} 過高"], "neutral", 0.20
+    _ni_yoy_early = fund.get("ni_yoy")
+    if _pe_early is not None:
+        if _pe_early > 100:
+            return [f"⚠ PE {_pe_early:.0f} 過高"], "neutral", 0.20
+        elif _pe_early > 60:
+            # 高 PE 但若獲利 YoY > 30%（成長股）→ 不降級
+            if _ni_yoy_early is None or _ni_yoy_early < 30:
+                return [f"⚠ PE {_pe_early:.0f} 過高"], "neutral", 0.20
+            # 否則繼續跑正常評分（PE 會在估值層扣一點分）
 
     # 新增：近期弱勢前置過濾
     # 條件 A：return60d < -20% 且均線空頭排列 → 強制 neutral
@@ -453,18 +669,15 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
             reasons.append(f"⚠ 產業高估 PE={pe:.0f} (同業中位 {industry_median_pe:.0f})")
             score -= 0.03
 
-    # 追高風險：標警告 + 輕扣分（不再重扣）
+    # 強勢股延續：主升段慣性通常延續，放寬追高門檻
+    # 改版：20-40% 視為正常上漲不扣分、40-60% 標警告不扣分、60%+ 才視為過熱扣分
     _r20 = tech.get("return20d")
     if _r20 is not None:
-        if _r20 > 30:
-            reasons.append(f"⚠ 追高風險：近20日漲 {_r20:.0f}%")
+        if _r20 > 60:
+            reasons.append(f"⚠ 短期過熱：近20日漲 {_r20:.0f}%")
             score -= 0.04
-        elif _r20 > 20:
-            reasons.append(f"⚠ 追高風險：近20日漲 {_r20:.0f}%")
-            score -= 0.03
-        elif _r20 > 15:
-            reasons.append(f"⚠ 短期偏熱：近20日漲 {_r20:.0f}%")
-            score -= 0.01
+        elif _r20 > 40:
+            reasons.append(f"短期強勢：近20日漲 {_r20:.0f}%")
 
     # == 第三層：月營收加分 ==
     if monthly:
@@ -678,12 +891,27 @@ def apply_rules(tech: dict, fund: dict, close: float, monthly: dict | None = Non
     if rs_pctile is not None:
         if rs_pctile >= 90:
             reasons.append(f"相對強度 RS {rs_pctile:.0f}%")
-            score += 0.03
+            score += 0.05  # 加重 0.03 → 0.05，強勢股給更多加分
         elif rs_pctile >= 80:
             reasons.append(f"相對強度 RS {rs_pctile:.0f}%")
-            score += 0.02
+            score += 0.03
+        elif rs_pctile >= 70:
+            score += 0.01  # 70-80% 也給小加分
         elif rs_pctile <= 20:
             score -= 0.02
+
+    # 強勢延續獎勵：RS 高 + 量能配合 → 主升段訊號
+    if rs_pctile is not None and rs_pctile >= 80:
+        # 價漲量增（量比 > 1.2 + 今日上漲）→ 加分
+        if vol_ratio is not None and vol_ratio > 1.2 and return20d is not None and return20d > 0:
+            reasons.append(f"強勢延續（RS {rs_pctile:.0f}% + 價漲量增）")
+            score += 0.03
+        # 接近 52 週高點 + 沒跌破月線 → 加分
+        high_1y = tech.get("high_1y")
+        sma20 = tech.get("sma20")
+        if high_1y and close >= high_1y * 0.95 and sma20 and close >= sma20:
+            reasons.append("接近新高 + 守穩月線")
+            score += 0.03
 
     if rsi is not None:
         if rsi < 35 and "rsi_oversold" not in _SUPPRESSED_RULES:
@@ -959,6 +1187,14 @@ def run_rule_engine():
             features["agent_score"] = agent_result["agent_score"]
             features["agent_consensus"] = agent_result["consensus"]
             features["agent_details"] = agent_result["details"]
+
+            # 5 維度分數（獨立計算，用於前端篩選）
+            dim_scores = calc_dim_scores(
+                tech, fund, close, monthly=monthly,
+                piotroski=pio, minervini=mini, rs_pctile=rs,
+                agent_result=agent_result,
+            )
+            features["dim_scores"] = dim_scores
 
             conn.execute(
                 """INSERT OR REPLACE INTO recommendations

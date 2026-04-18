@@ -181,33 +181,193 @@ function Skeleton() {
 // ────────────────────────────────────────
 type SK = 'score' | 'changePct' | 'volume' | 'close'
 
+type PerfSummary = {
+  n5: number; n20: number
+  avg5: number | null; avg20: number | null
+  excess5: number | null; excess20: number | null  // vs 大盤超額
+  net5: number | null; net20: number | null        // 扣 0.585% 交易成本
+  beat5: number | null; beat20: number | null      // 勝過大盤比例
+}
+type Perf = {
+  days: number; total: number; tx_cost: number
+  by_signal: Record<string, PerfSummary>
+  by_model: Record<string, PerfSummary>
+}
+
+function PerfHeader() {
+  const [perf, setPerf] = useState<Perf | null>(null)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    fetch('/api/performance?days=90').then(r => r.json()).then(setPerf).catch(() => {})
+  }, [])
+  if (!perf) return null
+  const buy = perf.by_signal?.buy
+  const fmt = (v: number | null, pct = false) =>
+    v == null ? '-' : pct ? `${(v * 100).toFixed(0)}%` : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
+  const col = (v: number | null) =>
+    v == null ? 'text-slate-500' : v >= 0 ? 'text-red-400' : 'text-green-400'
+  // 選最佳可用時窗：20d 優先（需 ≥10 樣本），否則 5d
+  const best = buy && buy.n20 >= 10 ? { k: '20', n: buy.n20, excess: buy.excess20, net: buy.net20, beat: buy.beat20, avg: buy.avg20 }
+             : buy && buy.n5 >= 10 ? { k: '5', n: buy.n5, excess: buy.excess5, net: buy.net5, beat: buy.beat5, avg: buy.avg5 }
+             : null
+
+  return (
+    <div className="bg-slate-800/40 rounded-md p-2 mb-2 text-xs">
+      <button onClick={() => setOpen(!open)} className="flex items-center gap-3 w-full text-left">
+        <span className="text-slate-400">📊 近 {perf.days} 天 Buy vs 大盤</span>
+        {best ? (
+          <>
+            <span className="text-slate-500">|</span>
+            <span title="buy 平均報酬 減 當日全市場平均報酬">
+              {best.k}日超額 <span className={`font-mono font-semibold ${col(best.excess)}`}>{fmt(best.excess)}</span>
+            </span>
+            <span className="text-slate-500">|</span>
+            <span title="扣一買一賣 0.585% 成本">
+              扣成本 <span className={`font-mono ${col(best.net)}`}>{fmt(best.net)}</span>
+            </span>
+            <span className="text-slate-500">|</span>
+            <span title="buy 報酬 > 大盤報酬 的比例">
+              勝大盤 <span className="font-mono text-slate-300">{fmt(best.beat, true)}</span>
+            </span>
+            <span className="text-slate-600 text-[10px]">({best.n} 樣本)</span>
+          </>
+        ) : (
+          <span className="text-slate-500 text-[11px]">資料累積中（需要 5 個交易日後才能評估）</span>
+        )}
+        <span className="text-slate-500 ml-auto">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="mt-2 pt-2 border-t border-slate-700/50 space-y-2">
+          {/* Buy 5d / 20d 詳情 */}
+          <div className="grid grid-cols-2 gap-2">
+            {(['5', '20'] as const).map(k => {
+              const n = buy?.[`n${k}` as 'n5'] ?? 0
+              const avg = buy?.[`avg${k}` as 'avg5'] ?? null
+              const ex = buy?.[`excess${k}` as 'excess5'] ?? null
+              const net = buy?.[`net${k}` as 'net5'] ?? null
+              const beat = buy?.[`beat${k}` as 'beat5'] ?? null
+              return (
+                <div key={k} className="bg-slate-900/40 rounded p-2">
+                  <div className="text-slate-400 mb-1">持有 {k} 個交易日（{n} 筆樣本）</div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
+                    <span className="text-slate-500">原始報酬</span>
+                    <span className={`font-mono text-right ${col(avg)}`}>{fmt(avg)}</span>
+                    <span className="text-slate-500">vs 大盤超額</span>
+                    <span className={`font-mono text-right font-semibold ${col(ex)}`}>{fmt(ex)}</span>
+                    <span className="text-slate-500">扣成本淨利</span>
+                    <span className={`font-mono text-right ${col(net)}`}>{fmt(net)}</span>
+                    <span className="text-slate-500">勝大盤比例</span>
+                    <span className="font-mono text-right text-slate-300">{fmt(beat, true)}</span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          {/* 4 模型 Top 20 組合超額報酬 */}
+          <div>
+            <div className="text-slate-400 text-[10px] mb-1">各派 Top20 組合（20 日超額報酬，不足 5 日資料顯示）</div>
+            <div className="grid grid-cols-4 gap-1">
+              {(['main', 'breakout', 'value', 'chip'] as const).map(m => {
+                const p = perf.by_model?.[m]
+                const label = { main: '綜合', breakout: '動能派', value: '價值派', chip: '跟主力' }[m]
+                const ex = p && p.n20 >= 10 ? p.excess20 : p?.excess5 ?? null
+                const k = p && p.n20 >= 10 ? '20' : '5'
+                const n = p && p.n20 >= 10 ? p.n20 : p?.n5 ?? 0
+                return (
+                  <div key={m} className="bg-slate-900/40 rounded p-1.5">
+                    <div className="text-[10px] text-slate-500">{label} ({k}日)</div>
+                    <div className={`font-mono text-[11px] font-semibold ${col(ex)}`}>{fmt(ex)}</div>
+                    <div className="text-[9px] text-slate-600">{n} 樣本</div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+          <div className="text-[10px] text-slate-600 leading-relaxed">
+            <b>vs 大盤超額</b>：推薦平均報酬 − 當日全市場平均報酬（正值代表跑贏大盤）。<br />
+            <b>扣成本淨利</b>：扣除一買一賣 {(perf.tx_cost || 0.585).toFixed(3)}%（手續費 0.1425%×2 + 證交稅 0.3%）。<br />
+            <b>勝大盤比例</b>：推薦股票報酬超過當日大盤的比例（&gt; 50% 才算有 alpha）。
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Table({ items }: { items: RecommendationItem[] }) {
   const [sig, setSig] = useState<'all' | 'buy' | 'watch' | 'neutral'>('all')
   const [tag, setTag] = useState<string | null>(null)
   const [sk, setSk] = useState<SK>('score')
   const [asc, setAsc] = useState(false)
+  // 5 維度最低分篩選（default: 全部關閉）
+  const [minFund, setMinFund] = useState(0)
+  const [minMom, setMinMom] = useState(0)
+  const [minChip, setMinChip] = useState(0)
+  const [minVal, setMinVal] = useState(0)
+  const [minVolume, setMinVolume] = useState(3000) // 成交量門檻
+  const [topN, setTopN] = useState<number | null>(null) // 只看 top N
+  // 預設風格排序：啟動時依對應 ml_sub_scores 排序（覆寫 sk）
+  const [presetSort, setPresetSort] = useState<'breakout' | 'value' | 'chip' | null>(null)
 
-  function sort(k: SK) { k === sk ? setAsc(!asc) : (setSk(k), setAsc(false)) }
+  function sort(k: SK) { setPresetSort(null); k === sk ? setAsc(!asc) : (setSk(k), setAsc(false)) }
 
   const sorted = [...items].sort((a, b) => {
     const ai = (a.tags?.some(t => t.tag === 'AI') ? 1 : 0) - (b.tags?.some(t => t.tag === 'AI') ? 1 : 0)
     if (ai) return -ai
+    // 預設排序：混合 ML 模型分數 + 規則維度分數（雙保險，降低單一模型 bias）
+    // 權重依各 ML 模型 AUC 品質反向調整：ML 越不可靠（AUC 低），規則權重越重
+    if (presetSort) {
+      const mix = (mlKey: 'breakout' | 'value' | 'chip', dimKey: 'momentum' | 'valuation' | 'chip', mlW: number) => {
+        const getScore = (it: RecommendationItem) => {
+          const ml = it.mlSubScores?.[mlKey] ?? it.score
+          const rule = (it.dimScores?.[dimKey] ?? 50) / 100
+          return ml * mlW + rule * (1 - mlW)
+        }
+        return [getScore(a), getScore(b)]
+      }
+      let av: number, bv: number
+      if (presetSort === 'breakout') {
+        // breakout AUC 0.614 （較高） → ML 0.55
+        [av, bv] = mix('breakout', 'momentum', 0.55)
+      } else if (presetSort === 'value') {
+        // value AUC 0.590 → ML 0.50
+        [av, bv] = mix('value', 'valuation', 0.50)
+      } else if (presetSort === 'chip') {
+        // chip AUC 0.566 （最低，易過擬合短期動能） → ML 0.40，規則 0.60
+        [av, bv] = mix('chip', 'chip', 0.40)
+      } else {
+        av = a.score; bv = b.score
+      }
+      return bv - av
+    }
     return asc ? ((a[sk] ?? 0) as number) - ((b[sk] ?? 0) as number) : ((b[sk] ?? 0) as number) - ((a[sk] ?? 0) as number)
   })
 
-  const bySig = sig === 'all' ? sorted : sorted.filter(i => i.signal === sig)
+  // 套用維度篩選
+  const dimFiltered = sorted.filter(i => {
+    if (!i.dimScores) return minFund === 0 && minMom === 0 && minChip === 0 && minVal === 0
+    const d = i.dimScores
+    return d.fundamental >= minFund && d.momentum >= minMom && d.chip >= minChip && d.valuation >= minVal
+  })
+
+  // 成交量篩選
+  const volFiltered = dimFiltered.filter(i => (i.volume ?? 0) >= minVolume)
+
+  const bySig = sig === 'all' ? volFiltered : volFiltered.filter(i => i.signal === sig)
 
   // AI sub-tags
   const stc = new Map<string, number>()
   for (const it of bySig) for (const s of new Set(it.tags?.filter(t => t.tag === 'AI' && t.sub_tag).map(t => t.sub_tag!) ?? [])) stc.set(s, (stc.get(s) ?? 0) + 1)
   const subs = [...stc.entries()].filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1]).map(([s]) => s)
 
-  const rows = tag ? bySig.filter(i => i.tags?.some(t => t.tag === 'AI' && t.sub_tag === tag)) : bySig
+  const tagFiltered = tag ? bySig.filter(i => i.tags?.some(t => t.tag === 'AI' && t.sub_tag === tag)) : bySig
+  const rows = topN ? tagFiltered.slice(0, topN) : tagFiltered
 
   const cnt = { all: items.length, buy: items.filter(i => i.signal === 'buy').length, watch: items.filter(i => i.signal === 'watch').length, neutral: items.filter(i => i.signal === 'neutral').length }
 
   return (
     <div>
+      <PerfHeader />
       {/* 篩選列 */}
       <div className="flex items-center gap-4 mb-2">
         <div className="flex gap-1.5">
@@ -241,6 +401,47 @@ function Table({ items }: { items: RecommendationItem[] }) {
         </div>
       )}
 
+      {/* 投資風格預設 + 維度篩選 */}
+      <div className="bg-slate-800/40 rounded-md p-2 mb-2 space-y-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-slate-500 mr-1">預設：</span>
+          <button onClick={() => { setMinFund(0); setMinMom(0); setMinChip(0); setMinVal(0); setTopN(null); setPresetSort(null) }}
+            className="text-[11px] px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300">清除篩選</button>
+          <button onClick={() => { setMinMom(70); setMinChip(60); setMinFund(50); setMinVal(0); setTopN(20); setPresetSort('breakout') }}
+            className={`text-[11px] px-2 py-0.5 rounded border ${presetSort==='breakout' ? 'bg-green-900 text-green-200 border-green-500' : 'bg-green-900/60 hover:bg-green-900 text-green-300 border-green-700/60'}`}>⚡ 動能派 (Top 20)</button>
+          <button onClick={() => { setMinFund(70); setMinVal(60); setMinMom(0); setMinChip(0); setTopN(20); setPresetSort('value') }}
+            className={`text-[11px] px-2 py-0.5 rounded border ${presetSort==='value' ? 'bg-blue-900 text-blue-200 border-blue-500' : 'bg-blue-900/60 hover:bg-blue-900 text-blue-300 border-blue-700/60'}`}>💎 價值派 (Top 20)</button>
+          <button onClick={() => { setMinFund(60); setMinMom(60); setMinChip(60); setMinVal(0); setTopN(20); setPresetSort(null) }}
+            className={`text-[11px] px-2 py-0.5 rounded border ${presetSort===null && minFund===60 && minMom===60 && minChip===60 ? 'bg-violet-900 text-violet-200 border-violet-500' : 'bg-violet-900/60 hover:bg-violet-900 text-violet-300 border-violet-700/60'}`}>⚖️ 均衡派 (Top 20)</button>
+          <button onClick={() => { setMinFund(0); setMinMom(0); setMinChip(80); setMinVal(0); setTopN(30); setPresetSort('chip') }}
+            className={`text-[11px] px-2 py-0.5 rounded border ${presetSort==='chip' ? 'bg-orange-900 text-orange-200 border-orange-500' : 'bg-orange-900/60 hover:bg-orange-900 text-orange-300 border-orange-700/60'}`}>🏛 跟主力 (Top 30)</button>
+        </div>
+        <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+          <DimSlider label="基本面" value={minFund} onChange={setMinFund} color="emerald" />
+          <DimSlider label="動能" value={minMom} onChange={setMinMom} color="red" />
+          <DimSlider label="籌碼" value={minChip} onChange={setMinChip} color="blue" />
+          <DimSlider label="估值" value={minVal} onChange={setMinVal} color="yellow" />
+          <label className="flex items-center gap-1.5">
+            <span>成交量≥</span>
+            <input type="number" value={minVolume} onChange={e => setMinVolume(parseInt(e.target.value) || 0)}
+              className="w-16 px-1.5 py-0.5 bg-slate-800 border border-slate-700 rounded text-slate-300" />
+            <span>張</span>
+          </label>
+          <label className="flex items-center gap-1.5">
+            <span>Top</span>
+            <select value={topN ?? ''} onChange={e => setTopN(e.target.value ? parseInt(e.target.value) : null)}
+              className="px-1.5 py-0.5 bg-slate-800 border border-slate-700 rounded text-slate-300">
+              <option value="">全部</option>
+              <option value="10">10</option>
+              <option value="20">20</option>
+              <option value="30">30</option>
+              <option value="50">50</option>
+            </select>
+          </label>
+          <span className="text-slate-500 ml-auto">過濾後：{rows.length} 檔</span>
+        </div>
+      </div>
+
       {/* 手機版卡片 */}
       <div className="sm:hidden space-y-1">
         {rows.map(it => <MobileCard key={it.symbol} item={it} />)}
@@ -256,6 +457,8 @@ function Table({ items }: { items: RecommendationItem[] }) {
               <Th label="漲跌" k="changePct" sk={sk} asc={asc} sort={sort} />
               <Th label="成交量" k="volume" sk={sk} asc={asc} sort={sort} />
               <Th label="評分" k="score" sk={sk} asc={asc} sort={sort} />
+              <th className="text-center py-2 px-3 font-medium whitespace-nowrap" title="基本面 / 動能 / 籌碼 / 估值 四維度分數 0-100">維度</th>
+              <th className="text-center py-2 px-3 font-medium whitespace-nowrap" title="ML 四模型看多機率：綜合排名 / 動能突破 / 價值估值 / 主力籌碼">AI模型</th>
               <th className="text-center py-2 px-3 font-medium whitespace-nowrap">訊號</th>
               <th className="text-center py-2 px-3 font-medium whitespace-nowrap" title="7 位投資大師（Buffett / Graham / Munger / Fisher / Druckenmiller / Wood / Ackman）共識">大師</th>
               <th className="text-left py-2 px-3 font-medium">推薦理由</th>
@@ -284,6 +487,8 @@ function Table({ items }: { items: RecommendationItem[] }) {
                 </td>
                 <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap">{it.volume ? it.volume.toLocaleString() : '-'}</td>
                 <td className="py-2 px-3 text-right whitespace-nowrap"><Score v={it.score} /></td>
+                <td className="py-2 px-3 text-center whitespace-nowrap"><DimBars d={it.dimScores} /></td>
+                <td className="py-2 px-3 text-center whitespace-nowrap"><MlBars m={it.mlSubScores} /></td>
                 <td className="py-2 px-3 text-center whitespace-nowrap"><Signal s={it.signal} /></td>
                 <td className="py-2 px-3 text-center whitespace-nowrap"><Consensus c={it.agentConsensus} d={it.agentDetails} /></td>
                 <td className="py-2 px-3">
@@ -322,6 +527,7 @@ function MobileCard({ item: it }: { item: RecommendationItem }) {
         <Signal s={it.signal} />
         <Score v={it.score} />
         <Consensus c={it.agentConsensus} d={it.agentDetails} />
+        <MlBars m={it.mlSubScores} />
         <span className="text-xs text-slate-600 ml-auto">{it.volume ? it.volume.toLocaleString() + '張' : ''}</span>
       </div>
       {it.reasons.length > 0 && (
@@ -375,6 +581,71 @@ function Signal({ s }: { s: string }) {
   }
   const l: Record<string, string> = { buy: '買入', watch: '觀察', neutral: '中立' }
   return <span className={`text-xs px-2 py-0.5 rounded ${m[s] ?? m.neutral}`}>{l[s] ?? s}</span>
+}
+
+function DimSlider({ label, value, onChange, color }: {
+  label: string; value: number; onChange: (v: number) => void; color: 'emerald' | 'red' | 'blue' | 'yellow'
+}) {
+  const colorMap: Record<string, string> = {
+    emerald: 'accent-emerald-500',
+    red: 'accent-red-500',
+    blue: 'accent-blue-500',
+    yellow: 'accent-yellow-500',
+  }
+  return (
+    <label className="flex items-center gap-1.5">
+      <span className="w-12">{label}≥</span>
+      <input type="range" min={0} max={100} step={5} value={value} onChange={e => onChange(parseInt(e.target.value))}
+        className={`w-20 ${colorMap[color]}`} />
+      <span className="w-6 text-right font-mono">{value}</span>
+    </label>
+  )
+}
+
+function MlBars({ m }: { m?: { main: number; breakout: number; value: number; chip: number } | null }) {
+  if (!m) return <span className="text-slate-700 text-xs">-</span>
+  // 4 個子模型機率 0~1 → 視覺化成 bar（0.5 以上才算看多）
+  const cells: Array<{ label: string; value: number; color: string }> = [
+    { label: '綜', value: m.main, color: '#a855f7' },       // 主 ranker (purple)
+    { label: '動', value: m.breakout, color: '#22c55e' },    // breakout (green)
+    { label: '值', value: m.value, color: '#3b82f6' },       // value (blue)
+    { label: '籌', value: m.chip, color: '#f97316' },        // chip (orange)
+  ]
+  const tip = `main ${(m.main*100).toFixed(0)}% / breakout ${(m.breakout*100).toFixed(0)}% / value ${(m.value*100).toFixed(0)}% / chip ${(m.chip*100).toFixed(0)}%`
+  return (
+    <div className="inline-flex items-center gap-0.5" title={tip}>
+      {cells.map(c => (
+        <div key={c.label} className="flex flex-col items-center">
+          <div className="w-3 h-6 bg-slate-800 rounded-sm overflow-hidden flex items-end">
+            <div style={{ height: `${Math.round(c.value * 100)}%`, background: c.color, width: '100%' }} />
+          </div>
+          <span className="text-[8px] text-slate-500 leading-none mt-0.5">{c.label}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function DimBars({ d }: { d?: { fundamental: number; momentum: number; chip: number; valuation: number; consensus: number } | null }) {
+  if (!d) return <span className="text-slate-700 text-xs">-</span>
+  const cells: Array<{ label: string; value: number; color: string }> = [
+    { label: '基', value: d.fundamental, color: '#10b981' },
+    { label: '動', value: d.momentum, color: '#ef4444' },
+    { label: '籌', value: d.chip, color: '#3b82f6' },
+    { label: '估', value: d.valuation, color: '#eab308' },
+  ]
+  return (
+    <div className="inline-flex items-center gap-0.5" title={`基本面 ${d.fundamental} / 動能 ${d.momentum} / 籌碼 ${d.chip} / 估值 ${d.valuation} / 大師 ${d.consensus}/7`}>
+      {cells.map(c => (
+        <div key={c.label} className="flex flex-col items-center">
+          <div className="w-3 h-6 bg-slate-800 rounded-sm overflow-hidden flex items-end">
+            <div style={{ height: `${c.value}%`, background: c.color, width: '100%' }} />
+          </div>
+          <span className="text-[8px] text-slate-500 leading-none mt-0.5">{c.label}</span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function Consensus({ c, d }: {

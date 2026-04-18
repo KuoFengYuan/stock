@@ -113,14 +113,18 @@ export async function GET(req: NextRequest) {
       ? ((row.close - row.prev_close) / row.prev_close) * 100
       : null
 
-    // 解析 agent 資訊
+    // 解析 agent 資訊 + 5 維度分數 + 多模型 sub-scores
     let agentConsensus: { bullish: number; neutral: number; bearish: number } | null = null
     let agentDetails: Array<{ name: string; signal: string; confidence: number; reasons: string[] }> | null = null
+    let dimScores: { fundamental: number; momentum: number; chip: number; valuation: number; consensus: number } | null = null
+    let mlSubScores: { main: number; breakout: number; value: number; chip: number; weights?: Record<string, number> } | null = null
     if (row.features_json) {
       try {
         const f = JSON.parse(row.features_json)
         if (f.agent_consensus) agentConsensus = f.agent_consensus
         if (f.agent_details) agentDetails = f.agent_details
+        if (f.dim_scores) dimScores = f.dim_scores
+        if (f.ml_sub_scores && typeof f.ml_sub_scores === 'object') mlSubScores = f.ml_sub_scores
       } catch { /* ignore */ }
     }
 
@@ -137,6 +141,8 @@ export async function GET(req: NextRequest) {
       tags: tagMap.get(row.symbol) || [],
       agentConsensus,
       agentDetails,
+      dimScores,
+      mlSubScores,
     }
   })
 

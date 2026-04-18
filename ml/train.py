@@ -29,6 +29,48 @@ FORWARD_DAYS = 20   # 短期：20 交易日（約 1 個月）
 RELATIVE_TOP_PCT = 0.20   # 前20%相對強勢視為正例
 MIN_ABSOLUTE_RET = 0.05   # 且絕對報酬需 > 5%（過濾橫盤、只留真噴發）
 
+# ───── 多模型特徵子集（specialized ensemble）─────
+# 每個模型專注一種 alpha pattern，避免特徵互相稀釋
+
+BREAKOUT_FEATURES = [
+    # 突破/型態/動能
+    "momentum_12_1", "rs_pctile_60d", "dist_from_52w_high",
+    "return20d", "return60d",
+    "new_high_20d", "consolidation_tight", "breakout_with_volume",
+    "vol_surge", "price_vol_bullish", "vol_ratio",
+    "distribution_flag", "near_high_weak_rsi",
+    "sma20_bias", "sma60_bias", "atr_pct", "bb_pos", "rsi14",
+    "rs_vs_industry_20d", "industry_momentum",
+    "rel_strength_vs_mkt", "market_return_20d",
+    "foreign_fut_net_oi", "foreign_fut_oi_chg_5d",  # 大盤方向
+]
+
+VALUE_FEATURES = [
+    # 估值 + 基本面
+    "pe_ratio", "pb_ratio", "eps_ttm", "pe_pct_in_industry",
+    "roe", "debt_ratio", "revenue_yoy", "ni_yoy",
+    "rev_consecutive_yoy", "rev_accel",
+    "market_return_60d", "beta_60d",
+    "earnings_drift",  # 公告後動能
+]
+
+CHIP_FEATURES = [
+    # 中期籌碼（主力建倉訊號，權重加重）
+    "foreign_net_60d", "trust_net_60d",
+    # 短期籌碼
+    "foreign_net_10d", "trust_net_10d", "both_inst_buying_10d",
+    "foreign_consec_buy", "trust_consec_buy",
+    "margin_balance_chg", "short_balance_chg",
+    # 事件窗口
+    "ex_div_window", "post_ex_div_recovery", "near_earnings",
+    # 輔助（移除 return20d 避免模型學成「最近漲很多」）
+    "return60d",              # 改用中期報酬，過濾短線噴出
+    "rs_vs_industry_20d",     # 相對產業強度
+    "vol_ratio",
+    # 大盤背景
+    "foreign_fut_net_oi", "foreign_fut_oi_chg_5d",
+]
+
 
 def _mark_exdiv_windows(price_df: pd.DataFrame, forward_days: int) -> pd.Series:
     """
@@ -129,6 +171,7 @@ def train():
         "both_inst_buying_10d",
         "foreign_consec_buy", "trust_consec_buy",
         "margin_balance_chg", "short_balance_chg",
+        "foreign_fut_net_oi", "foreign_fut_oi_chg_5d",
     ]
     for col in CHIP_ZERO_COLS:
         if col in X.columns:
@@ -151,65 +194,162 @@ def train():
     spw = neg_count / pos_count if pos_count > 0 else 1.0
     print(f"scale_pos_weight={spw:.2f}", flush=True)
 
+    EMBARGO_DAYS = FORWARD_DAYS
     tscv = TimeSeriesSplit(n_splits=5)
-    auc_scores = []
     dates_sorted = np.array(sorted(combined["date"].unique()))
 
-    model = xgb.XGBClassifier(
-        n_estimators=400,
-        max_depth=4,
-        learning_rate=0.04,
-        subsample=0.8,
-        colsample_bytree=0.7,
-        min_child_weight=5,     # 避免在小樣本分裂，降低過擬合
-        reg_alpha=0.1,           # L1 正則
-        reg_lambda=1.0,          # L2 正則
-        scale_pos_weight=spw,
-        eval_metric="auc",
-        random_state=42,
-        n_jobs=-1,
-    )
+    # ───────────────────────────────────────────────
+    # 通用 purged walk-forward helper
+    # ───────────────────────────────────────────────
+    def make_classifier():
+        return xgb.XGBClassifier(
+            n_estimators=400, max_depth=4, learning_rate=0.04,
+            subsample=0.8, colsample_bytree=0.7,
+            min_child_weight=5, reg_alpha=0.1, reg_lambda=1.0,
+            scale_pos_weight=spw, eval_metric="auc",
+            random_state=42, n_jobs=-1,
+        )
 
-    for fold, (train_idx, val_idx) in enumerate(tscv.split(dates_sorted)):
-        train_dates = set(dates_sorted[train_idx])
-        val_dates   = set(dates_sorted[val_idx])
-        mask_train  = combined["date"].isin(train_dates)
-        mask_val    = combined["date"].isin(val_dates)
-        X_train, y_train = X[mask_train], y[mask_train]
-        X_val,   y_val   = X[mask_val],   y[mask_val]
-        if len(X_train) < 100 or len(X_val) < 20:
-            continue
-        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-        proba = model.predict_proba(X_val)[:, 1]
-        auc = roc_auc_score(y_val, proba)
-        auc_scores.append(auc)
-        print(f"  Fold {fold+1}: AUC={auc:.4f} (train={len(X_train)}, val={len(X_val)})", flush=True)
+    def make_ranker():
+        return xgb.XGBRanker(
+            n_estimators=400, max_depth=4, learning_rate=0.04,
+            subsample=0.8, colsample_bytree=0.7,
+            min_child_weight=5, reg_alpha=0.1, reg_lambda=1.0,
+            objective="rank:pairwise", eval_metric=["ndcg@20", "auc"],
+            random_state=42, n_jobs=-1,
+        )
 
-    # 只取後 3 folds 平均（早期 folds 訓練資料太少會拖累）
-    if len(auc_scores) >= 3:
-        mean_auc = float(np.mean(auc_scores[-3:]))
-        print(f"平均 AUC（後 3 folds）: {mean_auc:.4f}", flush=True)
-    else:
-        mean_auc = float(np.mean(auc_scores)) if auc_scores else 0.60
-        print(f"平均 AUC: {mean_auc:.4f}", flush=True)
+    def cv_classifier(name, cols):
+        """對 classifier 跑 purged walk-forward，回傳 (mean_auc, mean_hit@20)"""
+        print(f"\n== {name} classifier ({len(cols)} features) ==", flush=True)
+        X_sub = X[cols]
+        aucs, hits = [], []
+        for fold, (tr_idx, vl_idx) in enumerate(tscv.split(dates_sorted)):
+            cutoff = max(0, vl_idx[0] - EMBARGO_DAYS)
+            purged = tr_idx[tr_idx < cutoff]
+            if len(purged) == 0:
+                continue
+            tr_dates = set(dates_sorted[purged])
+            vl_dates = set(dates_sorted[vl_idx])
+            mt = combined["date"].isin(tr_dates)
+            mv = combined["date"].isin(vl_dates)
+            Xt, yt = X_sub[mt], y[mt]
+            Xv, yv = X_sub[mv], y[mv]
+            if len(Xt) < 100 or len(Xv) < 20:
+                continue
+            m = make_classifier()
+            m.fit(Xt, yt, eval_set=[(Xv, yv)], verbose=False)
+            p = m.predict_proba(Xv)[:, 1]
+            aucs.append(roc_auc_score(yv, p))
+            vdf = combined[mv].copy()
+            vdf["p"] = p
+            h = [g.nlargest(20, "p")["label"].mean() for d, g in vdf.groupby("date") if len(g) >= 20]
+            hits.append(np.mean(h) if h else 0.0)
+            print(f"  Fold {fold+1}: AUC={aucs[-1]:.4f} hit@20={hits[-1]:.2%}", flush=True)
+        mean_auc = float(np.mean(aucs[-3:])) if len(aucs) >= 3 else float(np.mean(aucs)) if aucs else 0.55
+        mean_hit = float(np.mean(hits[-3:])) if len(hits) >= 3 else float(np.mean(hits)) if hits else 0.20
+        print(f"  {name}: 後 3 folds AUC={mean_auc:.4f}, hit@20={mean_hit:.2%}", flush=True)
+        return mean_auc, mean_hit
 
-    print("訓練最終模型...", flush=True)
-    model.fit(X, y, verbose=False)
+    def cv_ranker(name, cols):
+        """XGBRanker with query group = date"""
+        print(f"\n== {name} ranker ({len(cols)} features) ==", flush=True)
+        X_sub = X[cols]
+        aucs, hits = [], []
+        for fold, (tr_idx, vl_idx) in enumerate(tscv.split(dates_sorted)):
+            cutoff = max(0, vl_idx[0] - EMBARGO_DAYS)
+            purged = tr_idx[tr_idx < cutoff]
+            if len(purged) == 0:
+                continue
+            tr_dates = set(dates_sorted[purged])
+            vl_dates = set(dates_sorted[vl_idx])
+            mt = combined["date"].isin(tr_dates)
+            mv = combined["date"].isin(vl_dates)
+            if mt.sum() < 100 or mv.sum() < 20:
+                continue
+            # Ranker 需要 group（每個 query = 每個交易日的樣本數）
+            tr_df = combined[mt].sort_values("date")
+            vl_df = combined[mv].sort_values("date")
+            Xt = X_sub.loc[tr_df.index]
+            yt = y.loc[tr_df.index]
+            Xv = X_sub.loc[vl_df.index]
+            yv = y.loc[vl_df.index]
+            gt = tr_df.groupby("date").size().values
+            gv = vl_df.groupby("date").size().values
+            m = make_ranker()
+            m.fit(Xt, yt, group=gt, eval_set=[(Xv, yv)], eval_group=[gv], verbose=False)
+            p = m.predict(Xv)
+            try:
+                aucs.append(roc_auc_score(yv, p))
+            except Exception:
+                aucs.append(0.5)
+            vdf = vl_df.copy()
+            vdf["p"] = p
+            h = [g.nlargest(20, "p")["label"].mean() for d, g in vdf.groupby("date") if len(g) >= 20]
+            hits.append(np.mean(h) if h else 0.0)
+            print(f"  Fold {fold+1}: AUC={aucs[-1]:.4f} hit@20={hits[-1]:.2%}", flush=True)
+        mean_auc = float(np.mean(aucs[-3:])) if len(aucs) >= 3 else float(np.mean(aucs)) if aucs else 0.55
+        mean_hit = float(np.mean(hits[-3:])) if len(hits) >= 3 else float(np.mean(hits)) if hits else 0.20
+        print(f"  {name}: 後 3 folds AUC={mean_auc:.4f}, hit@20={mean_hit:.2%}", flush=True)
+        return mean_auc, mean_hit
+
+    # ───────────────────────────────────────────────
+    # 跑 4 個模型
+    # ───────────────────────────────────────────────
+    main_auc, main_hit = cv_ranker("main_ranker", FEATURE_COLS)
+    brk_auc, brk_hit = cv_classifier("breakout", BREAKOUT_FEATURES)
+    val_auc, val_hit = cv_classifier("value", VALUE_FEATURES)
+    chp_auc, chp_hit = cv_classifier("chip", CHIP_FEATURES)
+
+    # ───────────────────────────────────────────────
+    # 最終 fit 全資料
+    # ───────────────────────────────────────────────
+    print("\n訓練最終模型（全資料）...", flush=True)
+    full_sorted = combined.sort_values("date")
+    X_sorted = X.loc[full_sorted.index]
+    y_sorted = y.loc[full_sorted.index]
+    groups = full_sorted.groupby("date").size().values
+
+    main_model = make_ranker()
+    main_model.fit(X_sorted, y_sorted, group=groups, verbose=False)
+
+    brk_model = make_classifier(); brk_model.fit(X[BREAKOUT_FEATURES], y, verbose=False)
+    val_model = make_classifier(); val_model.fit(X[VALUE_FEATURES], y, verbose=False)
+    chp_model = make_classifier(); chp_model.fit(X[CHIP_FEATURES], y, verbose=False)
+
+    bundle = {
+        "version": "v4_multi",
+        "models": {
+            "main": main_model,
+            "breakout": brk_model,
+            "value": val_model,
+            "chip": chp_model,
+        },
+        "feature_cols": {
+            "main": FEATURE_COLS,
+            "breakout": BREAKOUT_FEATURES,
+            "value": VALUE_FEATURES,
+            "chip": CHIP_FEATURES,
+        },
+        "metrics": {
+            "main": {"auc": main_auc, "hit_at_20": main_hit},
+            "breakout": {"auc": brk_auc, "hit_at_20": brk_hit},
+            "value": {"auc": val_auc, "hit_at_20": val_hit},
+            "chip": {"auc": chp_auc, "hit_at_20": chp_hit},
+        },
+        # 向後相容：predict.py 舊介面讀 model/feature_cols/mean_auc
+        "model": main_model,
+        "mean_auc": main_auc,
+        "feature_medians": feature_medians.to_dict(),
+    }
 
     with open(MODEL_PATH, "wb") as f:
-        pickle.dump({
-            "model": model,
-            "feature_cols": FEATURE_COLS,
-            "mean_auc": mean_auc,
-            "feature_medians": feature_medians.to_dict(),   # 供預測時填補 NaN 用
-        }, f)
-    print(f"模型已儲存：{MODEL_PATH}", flush=True)
-
-    importance = dict(zip(FEATURE_COLS, model.feature_importances_))
-    top = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:10]
-    print("Top 10 特徵重要性：")
-    for k, v in top:
-        print(f"  {k}: {v:.4f}")
+        pickle.dump(bundle, f)
+    print(f"\n模型已儲存：{MODEL_PATH}", flush=True)
+    print(f"  main_ranker:  AUC={main_auc:.4f}  hit@20={main_hit:.2%}", flush=True)
+    print(f"  breakout_clf: AUC={brk_auc:.4f}  hit@20={brk_hit:.2%}", flush=True)
+    print(f"  value_clf:    AUC={val_auc:.4f}  hit@20={val_hit:.2%}", flush=True)
+    print(f"  chip_clf:     AUC={chp_auc:.4f}  hit@20={chp_hit:.2%}", flush=True)
 
 
 if __name__ == "__main__":
